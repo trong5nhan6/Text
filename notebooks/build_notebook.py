@@ -119,11 +119,23 @@ Mỗi config × task ≈ **2–4 phút** trên T4 (4 epoch, early stopping patie
 - Run đã xong → chạy lại sẽ bỏ qua, không train lại.
 - Đổi siêu tham số → thêm `--run_name <tên mới>` (hoặc `--overwrite`), nếu không script sẽ từ chối chạy.
 - Mỗi run lưu 1 checkpoint fp16 (~0.5 GB với model base); `/kaggle/working` giới hạn ~20 GB.""")
-code('''CONFIGS = ['muril', 'roberta']        # thêm: 'indicbert', 'bert', 'deberta', 'modernbert'
+code('''import time
+
+CONFIGS = ['muril', 'roberta']        # thêm: 'indicbert', 'bert', 'deberta', 'modernbert'
 TASKS   = ['a', 'b']
-for c in CONFIGS:
-    for t in TASKS:
-        !python train.py --config configs/{c}.yaml --task {t}''')
+
+t0 = time.time()
+for i, c in enumerate(CONFIGS):
+    for j, t in enumerate(TASKS):
+        n = i * len(TASKS) + j + 1
+        print("")
+        print("=" * 72)
+        print(f"[{n}/{len(CONFIGS) * len(TASKS)}]  config = {c}   |   task = {t}   "
+              f"|   {time.strftime('%H:%M:%S')}   |   +{(time.time() - t0) / 60:.1f} phut")
+        print("=" * 72, flush=True)
+        !python train.py --config configs/{c}.yaml --task {t}
+print("")
+print(f"xong {len(CONFIGS) * len(TASKS)} run trong {(time.time() - t0) / 60:.1f} phut")''')
 
 code('''# Ví dụ biến thể:
 # !python train.py --config configs/muril.yaml --task b --set training.loss=focal
@@ -155,9 +167,52 @@ for t in ('a', 'b'):
 # ------------------------------------------------------------ 5) submission
 md("""## 5) Submission
 
-- **Development phase (val):** mode 1, dùng xác suất đã lưu.
-- **Evaluation phase (test):** run train *sau* khi có test → `--split test`;
-  run train *trước* khi có test → mode 2 dùng checkpoint, không cần train lại.""")
+### Train nhiều model cùng lúc thì file nằm đâu?
+
+**Mỗi run một thư mục riêng, không cái nào đè cái nào.** Tên run mặc định là
+`<config>_<loss>_s<seed>`, task là thư mục cha:
+
+```
+results/
+├── a/                              Task A
+│   ├── tfidf_lr/                   eval.npy  val.npy  [test.npy]  metrics.json  config.yaml
+│   ├── tfidf_svm/
+│   ├── muril_ce_s42/               ← configs/muril.yaml  --task a
+│   └── roberta_ce_s42/             ← configs/roberta.yaml --task a
+├── b/                              Task B  (loss mặc định là wce nên tên là _wce_)
+│   ├── tfidf_lr/  tfidf_svm/  muril_wce_s42/  roberta_wce_s42/
+│   └── _blend/                     kết quả blend gần nhất
+└── metrics.csv                     1 dòng cho mỗi run, cả 2 task
+checkpoints/{task}/{run}/           trọng số fp16 của run đó
+```
+
+### Ba tập dữ liệu, đừng nhầm
+
+| File trong run | Là gì | Có nhãn? | Dùng để |
+|---|---|---|---|
+| `eval.npy` | lát held-out 10% **cắt ra từ train** | ✅ | chấm điểm nội bộ, chọn model, tìm trọng số blend |
+| `val.npy` | `*_validation_inputs.csv` **của BTC** | ❌ | **nộp phase Development** |
+| `test.npy` | `*_test_inputs.csv` (phát 20/9) | ❌ | **nộp phase Evaluation** |
+
+Chữ "val" xuất hiện ở hai nghĩa khác nhau: lát held-out (có nhãn, để bạn tự chấm) và file
+validation của BTC (không nhãn, để nộp). `eval.npy` là cái đầu, `val.npy` là cái sau.
+
+### Nộp thế nào
+
+Codabench có **2 leaderboard riêng biệt**, mỗi task nộp **một** `predictions.csv`. Bạn chỉ có
+**20 lượt nộp**, nên đừng nộp từng model — chọn theo điểm held-out ở mục 4 rồi nộp bản tốt nhất.
+
+- Run train *sau* khi có test → `--split test`
+- Run train *trước* khi có test → mode 2 (`--checkpoints ... --input ...`), không cần train lại""")
+
+md("**Cách 1 — mỗi run một file nộp riêng** (để đối chiếu, đặt tên theo task + run):")
+code('''import glob, os
+for t in ('a', 'b'):
+    for f in sorted(glob.glob(f'results/{t}/*/val.npy')):
+        run = os.path.basename(os.path.dirname(f))
+        !python inference.py --task {t} --runs {run} --split val --tag {run}''')
+
+md("**Cách 2 — ensemble** (thường tốt hơn; đổi tên run và trọng số theo bảng ở mục 4):")
 code('''!python inference.py --task a --runs tfidf_lr tfidf_svm muril_ce_s42 roberta_ce_s42 --split val --tag ens3
 !python inference.py --task b --runs tfidf_lr tfidf_svm muril_wce_s42 roberta_wce_s42 --split val --tag ens3
 # test, từ checkpoint:
