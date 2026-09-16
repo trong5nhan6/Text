@@ -26,6 +26,77 @@ def code(s):
     cells.append({"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": s})
 
 
+# Knobs offered in the notebook's OVERRIDES cell. The values shown there are read out of
+# configs/base.yaml at build time, so the cell can never claim a default the config does not have.
+KNOBS = [
+    ("--- huan luyen ---", None),
+    ("training.epochs", "tran, khong phai muc tieu; cung la do dai lich LR"),
+    ("training.early_stopping_patience", "dung khi macro-F1 khong cai thien bay nhieu epoch lien"),
+    ("training.lr", "learning rate cua backbone (head dung head_lr)"),
+    ("training.batch_size", None),
+    ("training.grad_accum", "tang len khi giam batch_size, de giu batch hieu dung"),
+    ("training.loss", "auto | ce | wce | focal   (auto: task a -> ce, task b -> wce)"),
+    ("training.label_smoothing", "bi bo qua khi loss=focal"),
+    ("--- du lieu ---", None),
+    ("data.max_len", "Religion / Geo-political dai hon, hay bi cat o 96"),
+    ("--- model ---", None),
+    ("model.pooling", "cls | mean"),
+    ("model.dropout", None),
+    ("seed", None),
+    ("--- dia ---", None),
+    ("checkpoint.save", "best | none   (none tiet kiem ~0.5 GB moi run)"),
+]
+
+
+def _overrides_cell() -> str:
+    import yaml
+    base = yaml.safe_load(open(ROOT / "configs" / "base.yaml", encoding="utf-8"))
+
+    def default_of(dotted):
+        node = base
+        for part in dotted.split("."):
+            node = node[part]
+        return node
+
+    keys = [k for k, _ in KNOBS if not k.startswith("---")]
+    width = max(len(k) for k in keys) + 4
+    lines = ["OVERRIDES = {          # gia tri = mac dinh trong configs/base.yaml, sua roi moi co tac dung"]
+    for key, note in KNOBS:
+        if key.startswith("---"):
+            lines.append(f"    # {key}")
+            continue
+        v = default_of(key)
+        v = f"'{v}'" if isinstance(v, str) else repr(v)
+        entry = f"    # '{key}':".ljust(width + 8) + f"{v},"
+        lines.append(f"{entry.ljust(width + 20)}# {note}" if note else entry)
+    lines.append("}")
+    return "\n".join(lines) + """
+RUN_SUFFIX = ''        # vi du '_e8' -> run ten muril_wce_s42_e8. BAT BUOC khi doi gia tri that su.
+
+# doi data.val_ratio / data.split_seed se chia lai split, moi ket qua cu se het so sanh duoc
+
+import yaml
+_base = yaml.safe_load(open('configs/base.yaml', encoding='utf-8'))
+def _default_of(k):
+    node = _base
+    for part in k.split('.'):
+        node = node[part]
+    return node
+
+changed = {k: v for k, v in OVERRIDES.items() if _default_of(k) != v}
+ARGS = " ".join(f"{k}={v}" for k, v in OVERRIDES.items())
+ARGS = (f"--set {ARGS}" if ARGS else "") + (f" --run_suffix {RUN_SUFFIX}" if RUN_SUFFIX else "")
+
+print("them vao lenh train:", ARGS or "(khong co, dung mac dinh)")
+if changed:
+    for k, v in changed.items():
+        print(f"  doi that su: {k}  {_default_of(k)} -> {v}")
+    if not RUN_SUFFIX:
+        print("!! RUN_SUFFIX dang trong -> train.py se tu choi chay de khong de len run cu")
+elif OVERRIDES:
+    print("  (cac dong da bo # deu dang giu nguyen mac dinh -> khong doi gi)")"""
+
+
 # ----------------------------------------------------------------- 0) setup
 md(f"""# HASTIKA @ ICON-2026 — Kaggle training notebook
 
@@ -134,54 +205,33 @@ print(yaml.safe_dump({k: cfg[k] for k in ('seed', 'data', 'model', 'training', '
 
 md("""### Chỉnh siêu tham số ngay ở đây
 
-Bỏ dấu `#` ở dòng nào thì dòng đó được truyền cho `train.py` bằng `--set`, **không cần sửa file
-trong repo**. Mọi khoá trong config đã gộp ở trên đều đổi được theo cú pháp `nhom.khoa=gia_tri`.
+**Giá trị đang thấy trong `OVERRIDES` chính là mặc định trong `configs/base.yaml`** (sinh tự động
+lúc build notebook), nên bỏ dấu `#` mà không sửa gì thì **không đổi gì cả**. Sửa giá trị rồi mới có
+tác dụng — cell tự so với `base.yaml` lúc chạy và chỉ báo những khoá thật sự khác.
 
 Nhớ đặt `RUN_SUFFIX` khi bạn đổi siêu tham số: run cũ và run mới sẽ có tên khác nhau nên không đè
 lên nhau và so sánh được với nhau. Nếu để trống mà siêu tham số đã đổi, `train.py` sẽ **từ chối chạy**
 thay vì âm thầm trộn kết quả.""")
-code('''OVERRIDES = {
-    # --- huan luyen ---
-    # 'training.epochs':        6,
-    # 'training.lr':            1.0e-5,
-    # 'training.batch_size':    16,
-    # 'training.grad_accum':    2,
-    # 'training.loss':          'focal',    # auto | ce | wce | focal
-    # 'training.label_smoothing': 0.05,
-    # 'training.early_stopping_patience': 3,
-    # --- du lieu ---
-    # 'data.max_len':           128,        # Religion / Geo-political dai hon, hay bi cat o 96
-    # --- model ---
-    # 'model.pooling':          'mean',     # cls | mean
-    # 'model.dropout':          0.2,
-    # 'seed':                   7,
-    # --- dia ---
-    # 'checkpoint.save':        'none',     # khong luu checkpoint (tiet kiem ~0.5 GB/run)
-}
-RUN_SUFFIX = ''         # vi du '_e6' -> run ten muril_wce_s42_e6. BAT BUOC khi doi OVERRIDES.
-
-# canh bao: doi data.val_ratio / data.split_seed se chia lai split va lam moi ket qua cu het so sanh duoc
-
-ARGS = " ".join(f"{k}={v}" for k, v in OVERRIDES.items())
-ARGS = (f"--set {ARGS}" if ARGS else "") + (f" --run_suffix {RUN_SUFFIX}" if RUN_SUFFIX else "")
-print("them vao lenh train:", ARGS or "(khong co, dung mac dinh)")
-if OVERRIDES and not RUN_SUFFIX:
-    print("!! co OVERRIDES nhung RUN_SUFFIX trong -> train.py se tu choi chay de khong de len run cu")''')
+code(_overrides_cell())
 
 md("""### Train
 
-Thời gian tuỳ số epoch **thực chạy** — `training.epochs` chỉ là trần, `early_stopping_patience`
-quyết định lúc dừng. Trên T4, MuRIL/XLM-R base với `batch_size: 64` mất ~40–60 giây mỗi epoch
-(task A ~90 step, task B ~45 step).
+Cấu hình hiện tại: `epochs: 30` là **trần**, `early_stopping_patience: 5` mới là thứ quyết định
+lúc dừng — train tiếp cho tới khi macro-F1 không cải thiện suốt 5 epoch liền.
+
+Trên T4, MuRIL/XLM-R base với `batch_size: 64` mất ~40–60 giây mỗi epoch (task A ~90 step,
+task B ~45 step). Thực tế thường dừng quanh epoch 8–15, tức **~8–15 phút mỗi run**, 4 run
+≈ 35–60 phút. Nếu sắp hết giờ session thì giảm `CONFIGS` hoặc `TASKS` lại.
 
 - Run đã xong → chạy lại sẽ bỏ qua, không train lại.
 - Mỗi run lưu 1 checkpoint fp16 (~0.5 GB với model base); `/kaggle/working` giới hạn ~20 GB.
 
 > **`epochs` vừa là trần vừa là độ dài lịch learning rate.** `trainer.py` tính
 > `steps = step_mỗi_epoch × epochs`, warmup = 10% số đó, rồi LR giảm tuyến tính về 0 ở step cuối.
-> Đặt `epochs` quá lớn so với lúc thực sự dừng thì LR **không kịp giảm**: với `epochs: 30`, warmup
-> kéo dài tận 3 epoch và tới epoch 6 LR vẫn còn ~89% đỉnh. Muốn early stopping quyết định thật sự
-> thì để `epochs` sát số epoch kỳ vọng (6–8) hơn là một số rất lớn.""")
+> Vì `epochs: 30` lớn hơn nhiều so với lúc thực sự dừng, warmup kéo dài 3 epoch đầu và LR **gần như
+> không giảm** trong suốt quá trình train (epoch 6 vẫn còn ~89% đỉnh, epoch 15 còn ~56%). Đây là
+> đánh đổi đã biết: model chạy ở LR cao ổn định thay vì có giai đoạn anneal cuối. Muốn có anneal thì
+> đặt `training.epochs` sát số epoch kỳ vọng — sửa được ngay ở cell OVERRIDES phía trên.""")
 code('''import time
 
 CONFIGS = ['muril', 'roberta']        # thêm: 'indicbert', 'bert', 'deberta', 'modernbert'

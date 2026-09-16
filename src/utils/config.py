@@ -82,9 +82,15 @@ _VOLATILE = {"paths", "run_name", "run_suffix", "config_name"}
 
 
 def training_signature(cfg: dict) -> dict:
-    sig = {k: v for k, v in cfg.items() if k not in _VOLATILE}
-    sig = copy.deepcopy(sig)
+    """What a run's results actually depend on. Compared against the stored config.yaml to
+    refuse resuming a run whose hyper-parameters changed -- so it must ignore every key the
+    model does not read, or unrelated edits to base.yaml would invalidate finished runs."""
+    sig = copy.deepcopy({k: v for k, v in cfg.items() if k not in _VOLATILE})
+    sig.pop("checkpoint", None)                          # saving weights cannot change them
+    if sig.get("model", {}).get("type") == "tfidf":
+        sig.pop("training", None)                        # the transformer block is unused here
+        sig.get("data", {}).pop("max_len", None)         # tokenizer-only setting
+        return sig
     sig.get("training", {}).pop("num_workers", None)
     sig.get("training", {}).pop("eval_batch_size", None)
-    sig.pop("checkpoint", None)
     return sig
