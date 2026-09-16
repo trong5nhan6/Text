@@ -36,6 +36,7 @@ def parse():
     ap.add_argument("--task", choices=["a", "b"])
     ap.add_argument("--seed", type=int)
     ap.add_argument("--run_name")
+    ap.add_argument("--run_suffix", help="appended to the default run name, e.g. _e6")
     ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE")
     ap.add_argument("--overwrite", action="store_true", help="delete previous results of this run")
     return ap.parse_args()
@@ -95,7 +96,8 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
 
 def main():
     a = parse()
-    cfg = load_config(a.config, a.set, task=a.task, seed=a.seed, run_name=a.run_name)
+    cfg = load_config(a.config, a.set, task=a.task, seed=a.seed,
+                      run_name=a.run_name, run_suffix=a.run_suffix)
     name = run_name(cfg)
     res_dir = Path(cfg["paths"]["results_dir"])
     run_dir = res_dir / cfg["task"] / name

@@ -62,11 +62,14 @@ def resolve_loss(cfg: dict) -> str:
 
 
 def run_name(cfg: dict) -> str:
+    """<config>_<loss>_s<seed> (tfidf: <config>_<clf>), plus an optional --run_suffix.
+    The suffix exists so a batch of runs with changed hyper-parameters can keep the
+    informative default name instead of being renamed one by one."""
     if cfg.get("run_name"):
         return cfg["run_name"]
-    if cfg["model"]["type"] == "tfidf":
-        return f"{cfg['config_name']}_{cfg['model'].get('clf', 'lr')}"
-    return f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}"
+    base = (f"{cfg['config_name']}_{cfg['model'].get('clf', 'lr')}" if cfg["model"]["type"] == "tfidf"
+            else f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}")
+    return base + (cfg.get("run_suffix") or "")
 
 
 def dump(cfg: dict, path):
@@ -75,7 +78,7 @@ def dump(cfg: dict, path):
 
 
 # keys that do not change the model's results -> ignored when checking a resumed run
-_VOLATILE = {"paths", "run_name", "config_name"}
+_VOLATILE = {"paths", "run_name", "run_suffix", "config_name"}
 
 
 def training_signature(cfg: dict) -> dict:

@@ -115,10 +115,73 @@ code('''# Dò C mịn hơn quanh giá trị vừa chọn (nhớ đổi --run_nam
 # ---------------------------------------------------------- 3) transformers
 md("""## 3) B1 — Transformers
 
-Mỗi config × task ≈ **2–4 phút** trên T4 (4 epoch, early stopping patience 2).
+### Config đang dùng
+
+`configs/base.yaml` là mặc định chung; mỗi model chỉ ghi đè phần khác biệt qua `_base_: base.yaml`.
+Cell dưới in ra **config đã gộp** — đúng những giá trị `train.py` sẽ chạy.""")
+code('''import yaml
+from src.utils.config import load_config, run_name
+
+SHOW = 'muril'          # đổi để xem config khác: tfidf muril roberta indicbert bert deberta modernbert
+SHOW_TASK = 'b'
+
+print(f"--- configs/{SHOW}.yaml (phan ghi de) ".ljust(72, "-"))
+print(open(f'configs/{SHOW}.yaml', encoding='utf-8').read())
+cfg = load_config(f'configs/{SHOW}.yaml', task=SHOW_TASK)
+print(f"--- config da gop, task={SHOW_TASK}, run se ten la '{run_name(cfg)}' ".ljust(72, "-"))
+print(yaml.safe_dump({k: cfg[k] for k in ('seed', 'data', 'model', 'training', 'checkpoint')},
+                     sort_keys=False, allow_unicode=True))''')
+
+md("""### Chỉnh siêu tham số ngay ở đây
+
+Bỏ dấu `#` ở dòng nào thì dòng đó được truyền cho `train.py` bằng `--set`, **không cần sửa file
+trong repo**. Mọi khoá trong config đã gộp ở trên đều đổi được theo cú pháp `nhom.khoa=gia_tri`.
+
+Nhớ đặt `RUN_SUFFIX` khi bạn đổi siêu tham số: run cũ và run mới sẽ có tên khác nhau nên không đè
+lên nhau và so sánh được với nhau. Nếu để trống mà siêu tham số đã đổi, `train.py` sẽ **từ chối chạy**
+thay vì âm thầm trộn kết quả.""")
+code('''OVERRIDES = {
+    # --- huan luyen ---
+    # 'training.epochs':        6,
+    # 'training.lr':            1.0e-5,
+    # 'training.batch_size':    16,
+    # 'training.grad_accum':    2,
+    # 'training.loss':          'focal',    # auto | ce | wce | focal
+    # 'training.label_smoothing': 0.05,
+    # 'training.early_stopping_patience': 3,
+    # --- du lieu ---
+    # 'data.max_len':           128,        # Religion / Geo-political dai hon, hay bi cat o 96
+    # --- model ---
+    # 'model.pooling':          'mean',     # cls | mean
+    # 'model.dropout':          0.2,
+    # 'seed':                   7,
+    # --- dia ---
+    # 'checkpoint.save':        'none',     # khong luu checkpoint (tiet kiem ~0.5 GB/run)
+}
+RUN_SUFFIX = ''         # vi du '_e6' -> run ten muril_wce_s42_e6. BAT BUOC khi doi OVERRIDES.
+
+# canh bao: doi data.val_ratio / data.split_seed se chia lai split va lam moi ket qua cu het so sanh duoc
+
+ARGS = " ".join(f"{k}={v}" for k, v in OVERRIDES.items())
+ARGS = (f"--set {ARGS}" if ARGS else "") + (f" --run_suffix {RUN_SUFFIX}" if RUN_SUFFIX else "")
+print("them vao lenh train:", ARGS or "(khong co, dung mac dinh)")
+if OVERRIDES and not RUN_SUFFIX:
+    print("!! co OVERRIDES nhung RUN_SUFFIX trong -> train.py se tu choi chay de khong de len run cu")''')
+
+md("""### Train
+
+Thời gian tuỳ số epoch **thực chạy** — `training.epochs` chỉ là trần, `early_stopping_patience`
+quyết định lúc dừng. Trên T4, MuRIL/XLM-R base với `batch_size: 64` mất ~40–60 giây mỗi epoch
+(task A ~90 step, task B ~45 step).
+
 - Run đã xong → chạy lại sẽ bỏ qua, không train lại.
-- Đổi siêu tham số → thêm `--run_name <tên mới>` (hoặc `--overwrite`), nếu không script sẽ từ chối chạy.
-- Mỗi run lưu 1 checkpoint fp16 (~0.5 GB với model base); `/kaggle/working` giới hạn ~20 GB.""")
+- Mỗi run lưu 1 checkpoint fp16 (~0.5 GB với model base); `/kaggle/working` giới hạn ~20 GB.
+
+> **`epochs` vừa là trần vừa là độ dài lịch learning rate.** `trainer.py` tính
+> `steps = step_mỗi_epoch × epochs`, warmup = 10% số đó, rồi LR giảm tuyến tính về 0 ở step cuối.
+> Đặt `epochs` quá lớn so với lúc thực sự dừng thì LR **không kịp giảm**: với `epochs: 30`, warmup
+> kéo dài tận 3 epoch và tới epoch 6 LR vẫn còn ~89% đỉnh. Muốn early stopping quyết định thật sự
+> thì để `epochs` sát số epoch kỳ vọng (6–8) hơn là một số rất lớn.""")
 code('''import time
 
 CONFIGS = ['muril', 'roberta']        # thêm: 'indicbert', 'bert', 'deberta', 'modernbert'
@@ -133,7 +196,7 @@ for i, c in enumerate(CONFIGS):
         print(f"[{n}/{len(CONFIGS) * len(TASKS)}]  config = {c}   |   task = {t}   "
               f"|   {time.strftime('%H:%M:%S')}   |   +{(time.time() - t0) / 60:.1f} phut")
         print("=" * 72, flush=True)
-        !python train.py --config configs/{c}.yaml --task {t}
+        !python train.py --config configs/{c}.yaml --task {t} {ARGS}
 print("")
 print(f"xong {len(CONFIGS) * len(TASKS)} run trong {(time.time() - t0) / 60:.1f} phut")''')
 
