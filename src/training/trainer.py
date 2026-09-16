@@ -1,4 +1,4 @@
-"""Single-fold trainer: AdamW + linear warmup, AMP, grad accumulation, early stopping on macro-F1."""
+"""Trainer: AdamW + linear warmup, AMP, grad accumulation, early stopping on macro-F1."""
 import copy
 import math
 import time
@@ -41,7 +41,7 @@ class Trainer:
         self.log = logger
         self.amp_dtype = resolve_precision(self.t.get("precision", "auto"), device)
 
-    def fit(self, train_df, valid_df, tag=""):
+    def fit(self, train_df, valid_df):
         t = self.t
         dl_tr = make_loader(train_df.text.tolist(), train_df.y.tolist(), self.tok, self.cfg, train=True)
         dl_va = make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False)
@@ -52,7 +52,7 @@ class Trainer:
         scaler = torch.amp.GradScaler(enabled=self.amp_dtype == torch.float16)
         patience = t.get("early_stopping_patience") or t["epochs"]
 
-        best = {"f1": -1.0, "epoch": 0, "state": None, "oof": None}
+        best = {"f1": -1.0, "epoch": 0, "state": None, "pred": None}
         history, bad = [], 0
         for ep in range(1, t["epochs"] + 1):
             self.model.train(); t0 = time.time(); total = 0.0
@@ -76,17 +76,17 @@ class Trainer:
             m = compute_metrics(valid_df.y, p_va.argmax(1))
             history.append({"epoch": ep, "loss": round(total / len(dl_tr), 4), **m})
             improved = m["macro_f1"] > best["f1"]
-            self.log.info(f"{tag} ep {ep}/{t['epochs']} loss {total / len(dl_tr):.4f} "
+            self.log.info(f"ep {ep}/{t['epochs']} loss {total / len(dl_tr):.4f} "
                           f"macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} "
                           f"({time.time() - t0:.0f}s){' *' if improved else ''}")
             if improved:
                 bad = 0
-                best = {"f1": m["macro_f1"], "epoch": ep, "oof": p_va,
+                best = {"f1": m["macro_f1"], "epoch": ep, "pred": p_va,
                         "state": {k: v.detach().to("cpu", copy=True) for k, v in self.model.state_dict().items()}}
             else:
                 bad += 1
                 if bad >= patience:
-                    self.log.info(f"{tag} early stop (no improvement for {patience} epochs)")
+                    self.log.info(f"early stop (no improvement for {patience} epochs)")
                     break
 
         self.model.load_state_dict(best["state"])      # restore best epoch

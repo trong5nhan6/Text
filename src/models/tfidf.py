@@ -1,4 +1,4 @@
-"""B0 — TF-IDF (char + word n-grams) + linear classifier, cross-validated on the fixed folds."""
+"""B0 — TF-IDF (char + word n-grams) + linear classifier on the fixed train/eval split."""
 import numpy as np
 from scipy.special import softmax
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -6,7 +6,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import FeatureUnion, make_pipeline
 from sklearn.svm import LinearSVC
 
-from src.data.dataset import eval_targets
+from src.data.dataset import split_rows
 from src.evaluation.metrics import compute_metrics
 
 
@@ -32,29 +32,20 @@ def _proba(pipe, texts):
     return softmax(d * 2.0, axis=1)      # pseudo-probabilities, only used for ensembling
 
 
-def cross_validate(cfg, train, val, test, n_labels, log=print):
+def fit_and_score(cfg, train, val, test, n_labels, log=print):
+    """Fit one model per C on the fit slice, keep the C with the best held-out macro-F1."""
     mcfg = cfg["model"]
     cw = mcfg.get("class_weight", "auto")
     balanced = (cfg["task"] == "b") if cw == "auto" else cw == "balanced"
-    folds = sorted(int(f) for f in train.fold.unique() if f >= 0)
-    mask, y_eval = eval_targets(train)
+    fit, ev = split_rows(train)
     best = None
     for C in mcfg.get("C_grid", [mcfg.get("C", 1.0)]):
-        oof = np.zeros((len(train), n_labels)); pv = np.zeros((len(val), n_labels))
-        pt = None if test is None else np.zeros((len(test), n_labels))
-        fold_f1 = []
-        for k in folds:
-            tr, va = train[train.fold != k], train[train.fold == k]
-            pipe = build_tfidf(mcfg, C, balanced).fit(tr.text, tr.y)
-            oof[va.index] = _proba(pipe, va.text)
-            fold_f1.append(compute_metrics(va.y, oof[va.index].argmax(1))["macro_f1"])
-            pv += _proba(pipe, val.text) / len(folds)
-            if test is not None:
-                pt += _proba(pipe, test.text) / len(folds)
-        m = compute_metrics(y_eval, oof[mask].argmax(1))
-        log(f"  C={C}: OOF macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} "
-            f"(fold {np.mean(fold_f1):.4f} ± {np.std(fold_f1):.4f})")
+        pipe = build_tfidf(mcfg, C, balanced).fit(fit.text, fit.y)
+        p_eval = _proba(pipe, ev.text)
+        m = compute_metrics(ev.y, p_eval.argmax(1))
+        log(f"  C={C}: macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f}")
         if best is None or m["macro_f1"] > best["macro_f1"]:
-            best = {"macro_f1": m["macro_f1"], "C": C, "oof": oof, "val": pv, "test": pt,
-                    "fold_f1": fold_f1, "balanced": balanced}
+            best = {"macro_f1": m["macro_f1"], "C": C, "balanced": balanced, "eval": p_eval,
+                    "val": _proba(pipe, val.text),
+                    "test": None if test is None else _proba(pipe, test.text)}
     return best

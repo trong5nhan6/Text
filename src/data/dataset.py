@@ -21,17 +21,15 @@ def label_names(task: str):
     return TASKS[task]["labels"]
 
 
-def eval_mask(train):
-    """Rows that receive a prediction: every row under cross-validation, only the
-    held-out slice under a holdout split (fold == -1 is fit-only). Metrics and
-    blending must be restricted to these rows."""
-    return (train.fold >= 0).to_numpy()
+def split_rows(train):
+    """-> (fit_df, eval_df). Every run uses the same split, so eval_df is identical
+    across runs and their saved predictions line up row for row."""
+    return train[train.is_val == 0], train[train.is_val == 1]
 
 
-def eval_targets(train):
-    """-> (mask, y of the evaluated rows)."""
-    m = eval_mask(train)
-    return m, train.y.to_numpy()[m]
+def eval_y(train):
+    """Gold labels of the held-out slice, aligned with each run's eval.npy."""
+    return train.y.to_numpy()[train.is_val.to_numpy() == 1]
 
 
 class TextDataset(Dataset):

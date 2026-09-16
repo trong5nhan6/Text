@@ -79,7 +79,8 @@ print("torch", torch.__version__, "| transformers", transformers.__version__,
 md("""## 1) Dữ liệu
 
 CSV của ban tổ chức nằm sẵn trong repo (`data/raw/`), nên chỉ cần làm sạch + chia split.
-Mặc định là **holdout 90/10** (`data.n_folds: 1`); đổi sang 5-fold bằng `--set data.n_folds=5`.""")
+Một lát **90% fit / 10% chấm điểm** (`data.val_ratio`), phân tầng theo nhãn và cố định bởi
+`data.split_seed` — mọi model dùng chung một lát nên blend được với nhau.""")
 code('''!ls data/raw
 !python -m src.data.preprocessing''')
 
@@ -97,8 +98,8 @@ code('''!python train.py --config configs/tfidf.yaml --task a
 # ---------------------------------------------------------- 3) transformers
 md("""## 3) B1 — Transformers
 
-Với holdout 90/10, mỗi config × task ≈ **2–4 phút** trên T4 (1 lát × 4 epoch, early stopping).
-- Bị ngắt giữa chừng → chạy lại đúng lệnh, lát đã xong được bỏ qua (cache trong `results/{task}/{run}/folds/`).
+Mỗi config × task ≈ **2–4 phút** trên T4 (4 epoch, early stopping patience 2).
+- Run đã xong → chạy lại sẽ bỏ qua, không train lại.
 - Đổi siêu tham số → thêm `--run_name <tên mới>` (hoặc `--overwrite`), nếu không script sẽ từ chối chạy.
 - Mỗi run lưu 1 checkpoint fp16 (~0.5 GB với model base); `/kaggle/working` giới hạn ~20 GB.""")
 code('''CONFIGS = ['muril', 'roberta']        # thêm: 'indicbert', 'bert', 'deberta', 'modernbert'
@@ -110,7 +111,6 @@ for c in CONFIGS:
 code('''# Ví dụ biến thể:
 # !python train.py --config configs/muril.yaml --task b --set training.loss=focal
 # !python train.py --config configs/muril.yaml --task b --set data.max_len=128 --run_name muril_len128
-# !python train.py --config configs/muril.yaml --task b --set data.n_folds=5      # 5-fold cho model chốt
 # !python train.py --config configs/roberta.yaml --task b --run_name xlmr_large \\
 #       --set model.name=xlm-roberta-large training.lr=1e-5 training.batch_size=16 training.grad_accum=2''')
 
@@ -120,16 +120,15 @@ code('''!du -sh checkpoints/*/* 2>/dev/null; df -h /kaggle/working | tail -1
 # -------------------------------------------------------------- 4) evaluate
 md("""## 4) Evaluate
 
-Cột `split` cho biết mỗi run được chấm trên lát nào; `n_eval` là số dòng dùng để chấm.
-Chỉ so sánh các run có cùng `split`.""")
+Mọi run đều chấm trên cùng một lát held-out (`n_eval` dòng) nên so sánh và blend được trực tiếp.""")
 code('''import pandas as pd
 display(pd.read_csv('results/metrics.csv'))
 !python evaluate.py --task a
 !python evaluate.py --task b''')
 
 code('''# blend + tối ưu trọng số trên lát eval (đổi tên run theo bảng trên)
-!python evaluate.py --task a --runs tfidf_lr_h10 muril_ce_s42_h10 roberta_ce_s42_h10 --optimize
-!python evaluate.py --task b --runs tfidf_lr_h10 muril_wce_s42_h10 roberta_wce_s42_h10 --optimize''')
+!python evaluate.py --task a --runs tfidf_lr muril_ce_s42 roberta_ce_s42 --optimize
+!python evaluate.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --optimize''')
 
 code('''from IPython.display import Image, display
 for t in ('a', 'b'):
@@ -143,10 +142,10 @@ md("""## 5) Submission
 - **Development phase (val):** mode 1, dùng xác suất đã lưu.
 - **Evaluation phase (test):** run train *sau* khi có test → `--split test`;
   run train *trước* khi có test → mode 2 dùng checkpoint, không cần train lại.""")
-code('''!python inference.py --task a --runs tfidf_lr_h10 muril_ce_s42_h10 roberta_ce_s42_h10 --split val --tag ens3
-!python inference.py --task b --runs tfidf_lr_h10 muril_wce_s42_h10 roberta_wce_s42_h10 --split val --tag ens3
+code('''!python inference.py --task a --runs tfidf_lr muril_ce_s42 roberta_ce_s42 --split val --tag ens3
+!python inference.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --split val --tag ens3
 # test, từ checkpoint:
-# !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42_h10 \\
+# !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 \\
 #       --input data/raw/multiclass_test_inputs.csv --tag ens1''')
 
 code('''import glob, shutil

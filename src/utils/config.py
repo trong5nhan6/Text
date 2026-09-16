@@ -4,8 +4,6 @@ from pathlib import Path
 
 import yaml
 
-from src.data.preprocessing import is_cv
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -63,18 +61,12 @@ def resolve_loss(cfg: dict) -> str:
     return ("ce" if cfg["task"] == "a" else "wce") if loss == "auto" else loss
 
 
-def split_suffix(cfg: dict) -> str:
-    """Holdout runs get a suffix so they never share a name (or a fold cache) with a CV run."""
-    d = cfg["data"]
-    return "" if is_cv(d.get("n_folds")) else f"_h{round(d.get('val_ratio', 0.1) * 100)}"
-
-
 def run_name(cfg: dict) -> str:
     if cfg.get("run_name"):
         return cfg["run_name"]
     if cfg["model"]["type"] == "tfidf":
-        return f"{cfg['config_name']}_{cfg['model'].get('clf', 'lr')}{split_suffix(cfg)}"
-    return f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}{split_suffix(cfg)}"
+        return f"{cfg['config_name']}_{cfg['model'].get('clf', 'lr')}"
+    return f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}"
 
 
 def dump(cfg: dict, path):

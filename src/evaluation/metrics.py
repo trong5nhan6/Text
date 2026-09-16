@@ -34,12 +34,6 @@ def plot_confusion(y_true, y_pred, labels, out_path, title=""):
     fig.tight_layout(); fig.savefig(out_path, dpi=130); plt.close(fig)
 
 
-def summarize_folds(fold_f1) -> dict:
-    return {"fold_f1": [round(float(f), 4) for f in fold_f1],
-            "fold_f1_mean": round(float(np.mean(fold_f1)), 4),
-            "fold_f1_std": round(float(np.std(fold_f1)), 4)}
-
-
 def rebuild_metrics_table(results_dir) -> pd.DataFrame:
     """Collect results/{task}/{run}/metrics.json -> results/metrics.csv (one row per run)."""
     results_dir = Path(results_dir)
@@ -47,9 +41,8 @@ def rebuild_metrics_table(results_dir) -> pd.DataFrame:
     for f in sorted(results_dir.glob("*/*/metrics.json")):
         m = json.load(open(f))
         rows.append({"task": f.parent.parent.name, "run": f.parent.name,
-                     **{k: m.get(k) for k in ("split", "macro_f1", "accuracy", "n_eval",
-                                              "fold_f1_mean", "fold_f1_std",
-                                              "model", "loss", "best_epochs", "has_test")}})
+                     **{k: m.get(k) for k in ("macro_f1", "accuracy", "n_eval",
+                                              "model", "loss", "best_epoch", "has_test")}})
     df = pd.DataFrame(rows)
     if len(df):
         df = df.sort_values(["task", "macro_f1"], ascending=[True, False])
