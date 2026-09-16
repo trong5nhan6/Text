@@ -33,7 +33,7 @@ docs/
   shared_task_README.md  FORMAT.md  LICENSE_NOTE.md   thể lệ gốc của ban tổ chức
   eda/README.md + figures/ + stats/                   báo cáo EDA
   starting_kit/                                       sample submission + baseline của BTC
-notebooks/              hastika_kaggle.ipynb (chạy trên Kaggle) + build_notebook.py
+notebooks/              hastika_kaggle.ipynb (clone repo + chạy trên Kaggle) + build_notebook.py
 results/                                                                      [ignored]
   metrics.csv                       bảng tổng hợp mọi run
   {task}/{run}/                     oof.npy val.npy [test.npy] metrics.json config.yaml per_class.csv confusion.png
@@ -107,9 +107,19 @@ python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42_h10 --inp
 ```
 
 ## Kaggle
-Mở `notebooks/hastika_kaggle.ipynb` trên Kaggle, bật **GPU T4** và **Internet**, rồi *Run All*.
-- Notebook đã chứa toàn bộ code nên không cần upload repo.
-- Sau khi sửa code hoặc config ở máy, chạy `python notebooks/build_notebook.py` để cập nhật notebook.
+`notebooks/hastika_kaggle.ipynb` **clone repo này rồi gọi các entrypoint** — nó không chứa bản sao
+code nào, nên sửa code ở máy chỉ cần `git push` là xong.
+
+1. kaggle.com/code ▸ New Notebook ▸ *File ▸ Import Notebook* ▸ chọn `notebooks/hastika_kaggle.ipynb`
+2. Panel phải: **Accelerator = GPU T4 ×2**, **Internet = On** (bắt buộc: cần cho `git clone` và tải model)
+3. *Run All*. Muốn chạy nền và giữ output thì **Save Version ▸ Save & Run All**
+
+- **Cập nhật code:** `git push` ở máy → chạy lại cell đầu tiên trên Kaggle (`git pull`). Không phải upload lại notebook.
+- **Repo phải Public**, hoặc nếu để Private thì tạo GitHub PAT (scope `repo`) và lưu vào
+  *Add-ons ▸ Secrets* với tên `GH_TOKEN` — cell đầu tự dò và che token khỏi log.
+- Repo được clone vào `/kaggle/working/repo`, nên `results/` và `checkpoints/` nằm trong output của notebook.
+  Cell cuối copy các `submission.zip` ra `/kaggle/working/submissions/` cho dễ tải về.
+- Sửa nội dung notebook: sửa `notebooks/build_notebook.py` rồi chạy `python notebooks/build_notebook.py`.
 
 ## Khi có test (20/9)
 1. Đặt `*test*.csv` vào `data/raw/`, rồi chạy `python -m src.data.preprocessing`. Fold train giữ nguyên.
