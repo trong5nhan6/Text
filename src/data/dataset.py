@@ -21,6 +21,19 @@ def label_names(task: str):
     return TASKS[task]["labels"]
 
 
+def eval_mask(train):
+    """Rows that receive a prediction: every row under cross-validation, only the
+    held-out slice under a holdout split (fold == -1 is fit-only). Metrics and
+    blending must be restricted to these rows."""
+    return (train.fold >= 0).to_numpy()
+
+
+def eval_targets(train):
+    """-> (mask, y of the evaluated rows)."""
+    m = eval_mask(train)
+    return m, train.y.to_numpy()[m]
+
+
 class TextDataset(Dataset):
     def __init__(self, texts, labels=None):
         self.texts = list(texts)

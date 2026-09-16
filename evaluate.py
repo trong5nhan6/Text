@@ -18,7 +18,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.data.dataset import label_names, load_split
+from src.data.dataset import eval_targets, label_names, load_split
+from src.data.preprocessing import split_spec
 from src.evaluation.metrics import compute_metrics, per_class_report, plot_confusion, rebuild_metrics_table
 from src.utils.config import load_config
 
@@ -52,33 +53,41 @@ def main():
     cfg = load_config(a.config, task=a.task)
     res = Path(cfg["paths"]["results_dir"]) / a.task
     train = load_split(cfg, "train")
+    mask, y_eval = eval_targets(train)          # holdout: only the held-out slice carries predictions
     labels = label_names(a.task)
     runs = a.runs or sorted(p.name for p in res.iterdir() if (p / "oof.npy").exists())
     if not runs:
         raise SystemExit(f"no finished runs in {res}")
 
+    scheme = split_spec(cfg)["scheme"]
     probs, rows = [], []
     for r in runs:
+        mf = res / r / "metrics.json"
+        was = json.load(open(mf)).get("split") if mf.exists() else None
+        if was is not None and was != scheme:
+            print(f"  ! {r} was trained on split '{was}' but data/processed now holds '{scheme}'. "
+                  f"Its score below is recomputed on the current slice, so it is NOT the number "
+                  f"reported when it was trained.")
         p = np.load(res / r / "oof.npy"); probs.append(p)
-        pred = p.argmax(1)
-        m = compute_metrics(train.y, pred)
-        rep = per_class_report(train.y, pred, labels)
+        pred = p[mask].argmax(1)
+        m = compute_metrics(y_eval, pred)
+        rep = per_class_report(y_eval, pred, labels)
         rep.to_csv(res / r / "per_class.csv")
-        plot_confusion(train.y, pred, labels, res / r / "confusion.png", f"{a.task}/{r}  macro-F1 {m['macro_f1']:.4f}")
+        plot_confusion(y_eval, pred, labels, res / r / "confusion.png", f"{a.task}/{r}  macro-F1 {m['macro_f1']:.4f}")
         rows.append({"run": r, **m, **{f"f1_{l}": rep.loc[l, "f1-score"] for l in labels}})
 
     if len(runs) > 1:
         if a.optimize:
-            w, _ = optimize_weights(probs, train.y)
+            w, _ = optimize_weights([p[mask] for p in probs], y_eval)
             print(f"optimized weights (OOF): {dict(zip(runs, w))}")
         else:
             w = a.weights or [1.0] * len(runs)
-        pb = blend(probs, w); pred = pb.argmax(1)
-        m = compute_metrics(train.y, pred)
-        rep = per_class_report(train.y, pred, labels)
+        pred = blend(probs, w)[mask].argmax(1)
+        m = compute_metrics(y_eval, pred)
+        rep = per_class_report(y_eval, pred, labels)
         out = res / "_blend"; out.mkdir(exist_ok=True)
         rep.to_csv(out / "per_class.csv")
-        plot_confusion(train.y, pred, labels, out / "confusion.png", f"{a.task} blend  macro-F1 {m['macro_f1']:.4f}")
+        plot_confusion(y_eval, pred, labels, out / "confusion.png", f"{a.task} blend  macro-F1 {m['macro_f1']:.4f}")
         json.dump({"runs": runs, "weights": [float(x) for x in w], **m}, open(out / "blend.json", "w"), indent=1)
         rows.append({"run": "BLEND(" + ", ".join(f"{r}:{x:.2f}" for r, x in zip(runs, np.asarray(w) / np.sum(w))) + ")",
                      **m, **{f"f1_{l}": rep.loc[l, "f1-score"] for l in labels}})

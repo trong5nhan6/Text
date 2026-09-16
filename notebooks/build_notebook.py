@@ -70,10 +70,11 @@ code("""!python train.py --config configs/tfidf.yaml --task a
 !python train.py --config configs/tfidf.yaml --task b""")
 
 md("""## 4) B1 — Transformers
-Mỗi config × task ≈ 10–20 phút trên T4 (5 fold × 4 epoch, early stopping).
-- Bị ngắt giữa chừng → chạy lại đúng lệnh, các fold đã xong được bỏ qua.
+Mặc định là **holdout 90/10** (`data.n_folds: 1`): mỗi config × task ≈ **2–4 phút** trên T4
+(1 lát × 4 epoch, early stopping). Muốn 5-fold thì thêm `--set data.n_folds=5` (≈ 10–20 phút).
+- Bị ngắt giữa chừng → chạy lại đúng lệnh, lát/fold đã xong được bỏ qua.
 - Đổi siêu tham số → thêm `--run_name <tên mới>` (hoặc `--overwrite`).
-- Mỗi run lưu 5 checkpoint fp16 (~0.5 GB/fold với model base). `/kaggle/working` giới hạn ~20 GB → xoá run không dùng (cell cuối mục này).""")
+- Mỗi lát lưu 1 checkpoint fp16 (~0.5 GB với model base). `/kaggle/working` giới hạn ~20 GB → xoá run không dùng (cell cuối mục này).""")
 code("""CONFIGS = ['muril', 'roberta']            # thêm: 'indicbert', 'bert', 'deberta', 'modernbert'
 TASKS = ['a', 'b']
 for c in CONFIGS:
@@ -93,8 +94,8 @@ display(pd.read_csv('results/metrics.csv'))
 !python evaluate.py --task a
 !python evaluate.py --task b""")
 code("""# blend + tối ưu trọng số trên OOF (đổi tên run theo bảng trên)
-!python evaluate.py --task a --runs tfidf_lr muril_ce_s42 roberta_ce_s42 --optimize
-!python evaluate.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --optimize""")
+!python evaluate.py --task a --runs tfidf_lr_h10 muril_ce_s42_h10 roberta_ce_s42_h10 --optimize
+!python evaluate.py --task b --runs tfidf_lr_h10 muril_wce_s42_h10 roberta_wce_s42_h10 --optimize""")
 code("""from IPython.display import Image
 Image('results/b/_blend/confusion.png')""")
 
@@ -103,10 +104,10 @@ md("""## 6) Submission
 - **Evaluation phase (test):**
   - run train *sau* khi có test → `--split test`
   - run train *trước* khi có test → mode 2 dùng checkpoint (`--checkpoints ... --input ...`), không cần train lại.""")
-code("""!python inference.py --task a --runs tfidf_lr muril_ce_s42 roberta_ce_s42 --split val --tag ens3
-!python inference.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --split val --tag ens3
+code("""!python inference.py --task a --runs tfidf_lr_h10 muril_ce_s42_h10 roberta_ce_s42_h10 --split val --tag ens3
+!python inference.py --task b --runs tfidf_lr_h10 muril_wce_s42_h10 roberta_wce_s42_h10 --split val --tag ens3
 # test, từ checkpoint:
-# !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 checkpoints/b/roberta_wce_s42 \\
+# !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42_h10 checkpoints/b/roberta_wce_s42_h10 \\
 #       --input data/raw/multiclass_test_inputs.csv --tag ens2
 !find results/submissions -name submission.zip""")
 

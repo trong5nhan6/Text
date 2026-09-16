@@ -49,6 +49,36 @@ python -m src.data.preprocessing          # tạo data/processed (train.py cũng
 python -m src.eda.eda                     # (tuỳ chọn) sinh lại báo cáo EDA ở docs/eda/
 ```
 
+## Chia dữ liệu: holdout (mặc định) hay cross-validation
+
+`configs/base.yaml` điều khiển bằng `data.n_folds`:
+
+| | `n_folds: 1` (mặc định) | `n_folds: 5` |
+|---|---|---|
+| Cách chia | 1 lát **90% fit / 10% eval**, phân tầng theo nhãn | 5 fold, mọi dòng đều được dự đoán 1 lần |
+| Thời gian train | **×1** | ×5 |
+| Số dòng chấm điểm | A 639 · B 315 | A 6.386 · B 3.142 |
+| Nhiễu của điểm số | Cao | Thấp |
+| Hậu tố tên run | `_h10` | (không có) |
+
+```bash
+python train.py --config configs/muril.yaml --task b                      # holdout 90/10
+python train.py --config configs/muril.yaml --task b --set data.n_folds=5 # quay lại 5-fold
+python train.py --config configs/muril.yaml --task b --set data.val_ratio=0.15
+```
+
+Cột `fold` trong `data/processed/{task}_train.csv` mang cả hai chế độ: **`fold >= 0` là lát được
+chấm điểm, `fold == -1` là dòng chỉ dùng để fit**. Mọi chỗ tính metric đều lọc qua `eval_mask()`
+(`src/data/dataset.py`), nên hai chế độ dùng chung một đường code.
+
+Đổi `n_folds` / `val_ratio` / `fold_seed` thì `data/processed/` **tự sinh lại** (đối chiếu với
+`{task}_split.json`), và tên run đổi hậu tố nên không bao giờ trộn cache của hai chế độ.
+
+> **Điểm holdout không so sánh trực tiếp được với điểm 5-fold.** Task B chỉ còn 315 dòng để chấm,
+> trong đó Geo-political 18 dòng và Violence 22 dòng — sai 1 mẫu ở lớp hiếm đã làm macro-F1 xê dịch
+> ~0,5 điểm. Dùng holdout để lặp nhanh, rồi chạy lại `--set data.n_folds=5` cho model cuối cùng
+> trước khi chốt.
+
 ## Train
 ```bash
 python train.py --config configs/tfidf.yaml --task a
@@ -56,8 +86,8 @@ python train.py --config configs/muril.yaml --task b
 python train.py --config configs/roberta.yaml --task b --set training.loss=focal --run_name roberta_focal
 python train.py --config configs/muril.yaml --task a --folds 0 1     # train một phần, chạy lại để tiếp tục
 ```
-- **Tên run mặc định** là `<config>_<loss>_s<seed>`, ví dụ `muril_wce_s42`; riêng TF-IDF là `tfidf_lr`.
-- **Tiếp tục khi bị ngắt:** mỗi fold xong được lưu cache, nên chạy lại đúng lệnh sẽ bỏ qua các fold đã có.
+- **Tên run mặc định** là `<config>_<loss>_s<seed>` + hậu tố chế độ chia, ví dụ `muril_wce_s42_h10`; riêng TF-IDF là `tfidf_lr_h10`.
+- **Tiếp tục khi bị ngắt:** mỗi fold xong được lưu cache, nên chạy lại đúng lệnh sẽ bỏ qua các fold đã có (holdout chỉ có 1 lát nên hoặc xong hoặc chưa).
 - **Đổi siêu tham số:** nếu giữ nguyên tên run, script sẽ **từ chối chạy**. Hãy dùng `--run_name` khác hoặc thêm `--overwrite`.
 - **Ghi đè cấu hình từ dòng lệnh:** mọi khoá trong YAML đều đổi được bằng `--set khoa.con=gia_tri`.
 - **Loss mặc định:** Task A dùng `ce`, Task B dùng `wce` (class weight = căn bậc hai của nghịch đảo tần suất).
@@ -65,15 +95,15 @@ python train.py --config configs/muril.yaml --task a --folds 0 1     # train m�
 ## Đánh giá (OOF)
 ```bash
 python evaluate.py --task b                                              # mọi run của task b
-python evaluate.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --optimize   # blend + tìm trọng số
+python evaluate.py --task b --runs tfidf_lr_h10 muril_wce_s42_h10 roberta_wce_s42_h10 --optimize   # blend + tìm trọng số
 ```
 
 ## Tạo file nộp
 ```bash
 # mode 1: xác suất đã lưu (val cho phase Development, test nếu run train sau khi có test)
-python inference.py --task b --runs tfidf_lr muril_wce_s42 --weights 1 2 --split val
+python inference.py --task b --runs tfidf_lr_h10 muril_wce_s42_h10 --weights 1 2 --split val
 # mode 2: từ checkpoint, cho run train trước khi có test (không cần train lại)
-python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 --input data/raw/multiclass_test_inputs.csv
+python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42_h10 --input data/raw/multiclass_test_inputs.csv
 ```
 
 ## Kaggle
@@ -86,12 +116,17 @@ Mở `notebooks/hastika_kaggle.ipynb` trên Kaggle, bật **GPU T4** và **Inter
 2. Run TF-IDF: chạy lại `train.py` (vài phút).
 3. Run transformer đã có checkpoint: dùng `inference.py --checkpoints ... --input ...`.
 
-## Kết quả hiện tại (OOF 5-fold)
-| Task | Run | Macro-F1 | Acc |
-|---|---|---|---|
-| A | tfidf_lr (C=16) | 0,8165 | 0,8166 |
-| B | tfidf_lr (C=1, balanced) | 0,6088 | 0,6859 |
-| B | tfidf_svm (C=0,5, balanced) | 0,6004 | 0,6935 |
+## Kết quả hiện tại
+| Task | Run | Chia | Macro-F1 | Acc |
+|---|---|---|---|---|
+| A | tfidf_lr_h10 (C=2) | holdout10 (639 dòng) | 0,8278 | 0,8279 |
+| A | tfidf_lr (C=16) | 5-fold (6.386 dòng) | 0,8165 | 0,8166 |
+| B | tfidf_lr_h10 (C=2) | holdout10 (315 dòng) | 0,6485 | 0,7270 |
+| B | tfidf_lr (C=1, balanced) | 5-fold (3.142 dòng) | 0,6088 | 0,6859 |
+| B | tfidf_svm (C=0,5, balanced) | 5-fold | 0,6004 | 0,6935 |
+
+Điểm holdout cao hơn vì fit trên 90% thay vì 80% **và** vì `C` được chọn trên chính lát 10% đó —
+đừng đọc hiệu số này như một cải thiện thật.
 
 Transformer: chưa chạy, cần train trên Kaggle.
 

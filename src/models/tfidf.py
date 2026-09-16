@@ -6,6 +6,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import FeatureUnion, make_pipeline
 from sklearn.svm import LinearSVC
 
+from src.data.dataset import eval_targets
 from src.evaluation.metrics import compute_metrics
 
 
@@ -35,7 +36,8 @@ def cross_validate(cfg, train, val, test, n_labels, log=print):
     mcfg = cfg["model"]
     cw = mcfg.get("class_weight", "auto")
     balanced = (cfg["task"] == "b") if cw == "auto" else cw == "balanced"
-    folds = sorted(int(f) for f in train.fold.unique())
+    folds = sorted(int(f) for f in train.fold.unique() if f >= 0)
+    mask, y_eval = eval_targets(train)
     best = None
     for C in mcfg.get("C_grid", [mcfg.get("C", 1.0)]):
         oof = np.zeros((len(train), n_labels)); pv = np.zeros((len(val), n_labels))
@@ -49,7 +51,7 @@ def cross_validate(cfg, train, val, test, n_labels, log=print):
             pv += _proba(pipe, val.text) / len(folds)
             if test is not None:
                 pt += _proba(pipe, test.text) / len(folds)
-        m = compute_metrics(train.y, oof.argmax(1))
+        m = compute_metrics(y_eval, oof[mask].argmax(1))
         log(f"  C={C}: OOF macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} "
             f"(fold {np.mean(fold_f1):.4f} ± {np.std(fold_f1):.4f})")
         if best is None or m["macro_f1"] > best["macro_f1"]:

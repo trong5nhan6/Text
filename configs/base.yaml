@@ -2,7 +2,7 @@
 # Any key can also be overridden from the CLI:  --set training.lr=1e-5 data.max_len=128
 task: a                     # a = Hate / Non-Hate, b = 6 hate categories (overridable with --task)
 seed: 42
-run_name: null              # default: <config name>_<loss>_s<seed>
+run_name: null              # default: <config>_<loss>_s<seed>[_h<val%> if holdout]
 
 paths:
   raw_dir: data/raw         # organiser CSVs (+ *test*.csv once released)
@@ -12,8 +12,11 @@ paths:
   log_dir: logs
 
 data:
-  n_folds: 5
-  fold_seed: 42             # keep fixed -> every model shares the same folds
+  # Evaluation split. n_folds: 1 -> single 90/10 holdout (5x faster, the default);
+  # n_folds: 5 -> full cross-validation (slower, lower-variance estimate).
+  n_folds: 1
+  val_ratio: 0.1            # size of the held-out slice when n_folds <= 1
+  fold_seed: 42             # keep fixed -> every model shares the same split
   max_len: 96               # 95% of comments < 35 words
 
 model:

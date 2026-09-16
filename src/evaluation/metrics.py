@@ -47,7 +47,8 @@ def rebuild_metrics_table(results_dir) -> pd.DataFrame:
     for f in sorted(results_dir.glob("*/*/metrics.json")):
         m = json.load(open(f))
         rows.append({"task": f.parent.parent.name, "run": f.parent.name,
-                     **{k: m.get(k) for k in ("macro_f1", "accuracy", "fold_f1_mean", "fold_f1_std",
+                     **{k: m.get(k) for k in ("split", "macro_f1", "accuracy", "n_eval",
+                                              "fold_f1_mean", "fold_f1_std",
                                               "model", "loss", "best_epochs", "has_test")}})
     df = pd.DataFrame(rows)
     if len(df):

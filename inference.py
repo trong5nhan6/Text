@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.data.dataset import label_names, load_split
+from src.data.dataset import eval_targets, label_names, load_split
 from src.data.preprocessing import read_inputs
 from src.evaluation.metrics import compute_metrics
 from src.utils.config import load_config
@@ -99,19 +99,20 @@ def main():
         if inp is None:
             raise SystemExit(f"data/processed/{a.task}_{a.split}.csv not found — run src.data.preprocessing")
         train = load_split(cfg, "train")
+        mask, y_eval = eval_targets(train)
         for r in a.runs:
             f = res / a.task / r / f"{a.split}.npy"
             if not f.exists():
                 raise SystemExit(f"{f} missing (run trained before the {a.split} file existed?) -> use mode 2")
             probs.append(np.load(f)); names.append(r)
             oof = np.load(res / a.task / r / "oof.npy")
-            print(f"  {r:35s} OOF {compute_metrics(train.y, oof.argmax(1))}")
+            print(f"  {r:35s} OOF {compute_metrics(y_eval, oof[mask].argmax(1))}")
         split_name = a.split
 
     w = np.asarray(a.weights or [1.0] * len(probs), float); w /= w.sum()
     if not a.checkpoints and len(a.runs) > 1:
         oof = sum(wi * np.load(res / a.task / r / "oof.npy") for wi, r in zip(w, a.runs))
-        print(f"  {'BLEND':35s} OOF {compute_metrics(train.y, oof.argmax(1))}")
+        print(f"  {'BLEND':35s} OOF {compute_metrics(y_eval, oof[mask].argmax(1))}")
     p = sum(wi * pi for wi, pi in zip(w, probs))
     assert len(p) == len(inp)
     tag = a.tag or "+".join(names)[:80]

@@ -22,8 +22,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from src.data.dataset import label_names, load_split
-from src.data.preprocessing import ensure_processed
+from src.data.dataset import eval_targets, label_names, load_split
+from src.data.preprocessing import ensure_processed, split_spec
 from src.evaluation.metrics import compute_metrics, rebuild_metrics_table, summarize_folds
 from src.utils.config import dump, load_config, resolve_loss, run_name, training_signature
 from src.utils.logger import get_logger
@@ -72,7 +72,7 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     ck_root = Path(cfg["paths"]["checkpoint_dir"]) / cfg["task"] / run_dir.name
     cache = run_dir / "folds"; cache.mkdir(parents=True, exist_ok=True)
 
-    all_folds = sorted(int(f) for f in train.fold.unique())
+    all_folds = sorted(int(f) for f in train.fold.unique() if f >= 0)
     for k in (cfg["_folds"] if cfg["_folds"] is not None else all_folds):
         f = cache / f"fold{k}.npz"
         if f.exists():
@@ -150,11 +150,14 @@ def main():
     np.save(run_dir / "oof.npy", out["oof"]); np.save(run_dir / "val.npy", out["val"])
     if out["test"] is not None:
         np.save(run_dir / "test.npy", out["test"])
-    metrics = {**compute_metrics(train.y, out["oof"].argmax(1)), **summarize_folds(out["fold_f1"]),
-               **out["extra"], "has_test": out["test"] is not None, "labels": labels}
+    mask, y_eval = eval_targets(train)
+    metrics = {**compute_metrics(y_eval, out["oof"][mask].argmax(1)), **summarize_folds(out["fold_f1"]),
+               **out["extra"], "split": split_spec(cfg)["scheme"], "n_eval": int(mask.sum()),
+               "has_test": out["test"] is not None, "labels": labels}
     json.dump(metrics, open(run_dir / "metrics.json", "w"), indent=1)
     rebuild_metrics_table(res_dir)
-    log.info(f"==> {cfg['task']}/{name}: OOF macro-F1 {metrics['macro_f1']:.4f} | acc {metrics['accuracy']:.4f} "
+    log.info(f"==> {cfg['task']}/{name} [{metrics['split']}, {metrics['n_eval']} eval rows]: "
+             f"macro-F1 {metrics['macro_f1']:.4f} | acc {metrics['accuracy']:.4f} "
              f"| folds {metrics['fold_f1_mean']:.4f} ± {metrics['fold_f1_std']:.4f}")
 
 
