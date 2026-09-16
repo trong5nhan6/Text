@@ -91,9 +91,26 @@ code('''# Cách 1 — test đã được push vào repo: chỉ cần chạy lạ
 # !python -m src.data.preprocessing''')
 
 # ----------------------------------------------------------------- 2) tfidf
-md("## 2) B0 — TF-IDF (CPU, ~30 giây mỗi task)")
+md("""## 2) B0 — TF-IDF (CPU, ~30 giây mỗi run)
+
+`C` là tham số điều chuẩn của mô hình tuyến tính, theo nghĩa **nghịch đảo**: `C` nhỏ = phạt trọng số
+mạnh = model đơn giản (dễ underfit); `C` lớn = ưu tiên khớp dữ liệu = dễ overfit. Ở đây đặc trưng
+TF-IDF có tới 300k chiều trên vài nghìn dòng train, nên `C` là siêu tham số quan trọng nhất của B0.
+
+`train.py` fit một model cho **mỗi giá trị trong `model.C_grid`** rồi giữ cái có macro-F1 cao nhất
+trên lát held-out. Giá trị được chọn hiện trong `results/metrics.csv`, ví dụ `tfidf-lr C=2`.
+
+LR và SVM **không cùng thang `C`** (loss khác nhau), nên SVM dùng dải nhỏ hơn. Chạy cả hai vì blend
+của chúng thường tốt hơn từng cái một.""")
 code('''!python train.py --config configs/tfidf.yaml --task a
 !python train.py --config configs/tfidf.yaml --task b''')
+
+code('''# LinearSVC — run tự đặt tên tfidf_svm, dải C nhỏ hơn LR
+!python train.py --config configs/tfidf.yaml --task a --set model.clf=svm "model.C_grid=[0.05,0.1,0.25,0.5,1]"
+!python train.py --config configs/tfidf.yaml --task b --set model.clf=svm "model.C_grid=[0.05,0.1,0.25,0.5,1]"''')
+
+code('''# Dò C mịn hơn quanh giá trị vừa chọn (nhớ đổi --run_name, nếu không script từ chối chạy):
+# !python train.py --config configs/tfidf.yaml --task b --run_name tfidf_lr_fine --set "model.C_grid=[0.25,0.5,1,1.5,2,3,4]"''')
 
 # ---------------------------------------------------------- 3) transformers
 md("""## 3) B1 — Transformers
@@ -111,8 +128,7 @@ for c in CONFIGS:
 code('''# Ví dụ biến thể:
 # !python train.py --config configs/muril.yaml --task b --set training.loss=focal
 # !python train.py --config configs/muril.yaml --task b --set data.max_len=128 --run_name muril_len128
-# !python train.py --config configs/roberta.yaml --task b --run_name xlmr_large \\
-#       --set model.name=xlm-roberta-large training.lr=1e-5 training.batch_size=16 training.grad_accum=2''')
+# !python train.py --config configs/roberta.yaml --task b --run_name xlmr_large --set model.name=xlm-roberta-large training.lr=1e-5 training.batch_size=16 training.grad_accum=2''')
 
 code('''!du -sh checkpoints/*/* 2>/dev/null; df -h /kaggle/working | tail -1
 # xoá run không cần:  !rm -rf checkpoints/b/<run_name> results/b/<run_name>''')
@@ -127,8 +143,8 @@ display(pd.read_csv('results/metrics.csv'))
 !python evaluate.py --task b''')
 
 code('''# blend + tối ưu trọng số trên lát eval (đổi tên run theo bảng trên)
-!python evaluate.py --task a --runs tfidf_lr muril_ce_s42 roberta_ce_s42 --optimize
-!python evaluate.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --optimize''')
+!python evaluate.py --task a --runs tfidf_lr tfidf_svm muril_ce_s42 roberta_ce_s42 --optimize
+!python evaluate.py --task b --runs tfidf_lr tfidf_svm muril_wce_s42 roberta_wce_s42 --optimize''')
 
 code('''from IPython.display import Image, display
 for t in ('a', 'b'):
@@ -142,11 +158,10 @@ md("""## 5) Submission
 - **Development phase (val):** mode 1, dùng xác suất đã lưu.
 - **Evaluation phase (test):** run train *sau* khi có test → `--split test`;
   run train *trước* khi có test → mode 2 dùng checkpoint, không cần train lại.""")
-code('''!python inference.py --task a --runs tfidf_lr muril_ce_s42 roberta_ce_s42 --split val --tag ens3
-!python inference.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --split val --tag ens3
+code('''!python inference.py --task a --runs tfidf_lr tfidf_svm muril_ce_s42 roberta_ce_s42 --split val --tag ens3
+!python inference.py --task b --runs tfidf_lr tfidf_svm muril_wce_s42 roberta_wce_s42 --split val --tag ens3
 # test, từ checkpoint:
-# !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 \\
-#       --input data/raw/multiclass_test_inputs.csv --tag ens1''')
+# !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 --input data/raw/multiclass_test_inputs.csv --tag ens1''')
 
 code('''import glob, shutil
 out = '/kaggle/working/submissions'

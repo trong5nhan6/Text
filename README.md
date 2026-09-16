@@ -122,9 +122,14 @@ code nào, nên sửa code ở máy chỉ cần `git push` là xong.
 | Task | Run | Macro-F1 | Acc | n_eval |
 |---|---|---|---|---|
 | A | tfidf_lr (C=2) | 0,8278 | 0,8279 | 639 |
+| A | tfidf_svm (C=0,1) | 0,8309 | 0,8310 | 639 |
+| A | blend lr 0,1 + svm 0,9 | **0,8325** | 0,8326 | 639 |
 | B | tfidf_lr (C=2, balanced) | 0,6485 | 0,7270 | 315 |
 | B | tfidf_svm (C=0,1, balanced) | 0,6439 | 0,7270 | 315 |
 | B | blend lr 0,6 + svm 0,4 | **0,6587** | 0,7365 | 315 |
+
+`C` là tham số điều chuẩn của mô hình tuyến tính (nghịch đảo mức phạt); `train.py` tự chọn giá trị
+tốt nhất trong `model.C_grid` theo macro-F1 trên lát held-out. LR và SVM không cùng thang `C`.
 
 Transformer: chưa chạy, cần train trên Kaggle.
 
