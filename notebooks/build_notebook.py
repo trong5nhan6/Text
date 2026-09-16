@@ -318,12 +318,13 @@ Codabench có **2 leaderboard riêng biệt**, mỗi task nộp **một** `predi
 - Run train *sau* khi có test → `--split test`
 - Run train *trước* khi có test → mode 2 (`--checkpoints ... --input ...`), không cần train lại""")
 
-md("**Cách 1 — mỗi run một file nộp riêng** (để đối chiếu, đặt tên theo task + run):")
+md("""**Cách 1 — từng model riêng: đã có sẵn.** `train.py` tự sinh file nộp cho file validation của
+BTC ngay sau khi train xong, đặt tên `{task}_val_{run}`. Cell này chỉ để xem lại danh sách:""")
 code('''import glob, os
-for t in ('a', 'b'):
-    for f in sorted(glob.glob(f'results/{t}/*/val.npy')):
-        run = os.path.basename(os.path.dirname(f))
-        !python inference.py --task {t} --runs {run} --split val --tag {run}''')
+for z in sorted(glob.glob('results/submissions/*/submission.zip')):
+    d = os.path.dirname(z)
+    n = sum(1 for _ in open(f'{d}/predictions.csv', encoding='utf-8')) - 1
+    print(f"{os.path.basename(d):45s} {n:5d} dong")''')
 
 md("**Cách 2 — ensemble** (thường tốt hơn; đổi tên run và trọng số theo bảng ở mục 4):")
 code('''!python inference.py --task a --runs tfidf_lr tfidf_svm muril_ce_s42 roberta_ce_s42 --split val --tag ens3

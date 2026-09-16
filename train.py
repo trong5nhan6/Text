@@ -17,6 +17,7 @@ is refused. Use --run_name or --overwrite.
 import argparse
 import json
 import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ import yaml
 from src.data.dataset import label_names, load_split, split_rows
 from src.data.preprocessing import ensure_processed
 from src.evaluation.metrics import compute_metrics, rebuild_metrics_table
+from src.evaluation.submission import write_submission
 from src.utils.config import dump, load_config, resolve_loss, run_name, training_signature
 from src.utils.logger import get_logger
 from src.utils.seed import set_seed
@@ -76,8 +78,11 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
              f"precision={cfg['training']['precision']} | {len(fit)} fit / {len(ev)} eval")
 
     set_seed(cfg["seed"])
+    t0 = time.time()
+    log.info(f"tai tokenizer + trong so {cfg['model']['name']} ...")   # quiet: no HF progress bars
     tokenizer = build_tokenizer(cfg)
     model = build_model(cfg, n_labels)
+    log.info(f"san sang sau {time.time() - t0:.0f}s")
     trainer = Trainer(cfg, model, tokenizer, build_loss(loss_name, cfg["training"], counts), device, log)
     best = trainer.fit(fit, ev)
 
@@ -128,6 +133,12 @@ def main():
                "n_eval": len(ev), "has_test": out["test"] is not None, "labels": labels}
     json.dump(metrics, open(run_dir / "metrics.json", "w"), indent=1)
     rebuild_metrics_table(res_dir)
+
+    # ready-to-submit file for every split we have predictions for
+    subs = res_dir / "submissions"
+    write_submission(val.id.values, out["val"], labels, subs / f"{cfg['task']}_val_{name}", log.info)
+    if out["test"] is not None:
+        write_submission(test.id.values, out["test"], labels, subs / f"{cfg['task']}_test_{name}", log.info)
     log.info(f"==> {cfg['task']}/{name} [{len(ev)} eval rows]: "
              f"macro-F1 {metrics['macro_f1']:.4f} | acc {metrics['accuracy']:.4f}")
 

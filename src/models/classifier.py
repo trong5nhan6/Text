@@ -13,9 +13,15 @@ class TransformerClassifier(nn.Module):
                  dropout: float = 0.1, backbone_config=None):
         super().__init__()
         if backbone_config is None:                      # training: load pretrained weights
-            self.backbone = AutoModel.from_pretrained(backbone_name)
+            # .float() is not redundant: some published checkpoints store fp16 weights
+            # (mDeBERTa-v3 does) and transformers keeps the checkpoint's dtype, which then
+            # meets the fp32 head as "mat1 and mat2 must have the same dtype". AMP wants fp32
+            # master weights anyway -- mixed precision is applied by autocast, not by the weights.
+            self.backbone = AutoModel.from_pretrained(backbone_name).float()
         else:                                            # inference: architecture only, weights come from ckpt
-            self.backbone = AutoModel.from_config(backbone_config)
+            # .float() for the same reason, from the other direction: a config saved off an fp16
+            # backbone builds an fp16 one, and load_state_dict copies in place, so fp16 would stick.
+            self.backbone = AutoModel.from_config(backbone_config).float()
         self.meta = {"backbone_name": backbone_name, "num_labels": num_labels,
                      "pooling": pooling, "dropout": dropout}
         self.pooling = pooling

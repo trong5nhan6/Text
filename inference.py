@@ -15,15 +15,14 @@ Use this when the test file arrives after training (no retraining needed):
 Output: results/submissions/{task}_{split|input}_{tag}/predictions.csv + submission.zip
 """
 import argparse
-import zipfile
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 from src.data.dataset import eval_y, label_names, load_split
 from src.data.preprocessing import read_inputs
 from src.evaluation.metrics import compute_metrics
+from src.evaluation.submission import write_submission
 from src.utils.config import load_config
 
 
@@ -43,17 +42,6 @@ def predict_checkpoint_dir(run_ckpt: Path, texts, batch_size=64, precision="auto
     out = predict_proba(model.to(device), dl, device, resolve_precision(precision, device))
     print(f"  {run_ckpt}: held-out macro-F1 {meta.get('macro_f1')} @ epoch {meta.get('epoch')}")
     return out
-
-
-def write_submission(ids, probs, labels, out_dir: Path):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    sub = pd.DataFrame({"id": ids, "label": np.array(labels)[probs.argmax(1)]})
-    sub.to_csv(out_dir / "predictions.csv", index=False, encoding="utf-8")
-    np.save(out_dir / "probs.npy", probs)
-    with zipfile.ZipFile(out_dir / "submission.zip", "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(out_dir / "predictions.csv", arcname="predictions.csv")
-    print(sub.label.value_counts().to_string())
-    print(f"==> {out_dir / 'submission.zip'}  ({len(sub)} rows)")
 
 
 def main():

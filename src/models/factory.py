@@ -1,6 +1,21 @@
+import os
 from pathlib import Path
 
+# Hugging Face draws tqdm bars while downloading and while materialising weights. Outside a TTY
+# -- a notebook cell, a redirected log -- tqdm cannot rewrite its line, so one bar becomes
+# hundreds of "Loading weights: 3%|..." lines that bury our own output. Must run before
+# transformers (and through it huggingface_hub) reads these at import time.
+# Set HASTIKA_HF_VERBOSE=1 to get the bars back.
+_QUIET = not os.environ.get("HASTIKA_HF_VERBOSE")
+if _QUIET:
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")   # Windows-only noise
+
 from transformers import AutoTokenizer
+from transformers.utils import logging as hf_logging
+
+if _QUIET:
+    hf_logging.disable_progress_bar()       # the "Loading weights" bar; verbosity is left alone
 
 from src.models.classifier import TransformerClassifier
 
