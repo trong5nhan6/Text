@@ -1,0 +1,8 @@
+# mDeBERTa-v3 (multilingual DeBERTa). fp16 can overflow with DeBERTa-v3 -> use bf16 (A100/L4) or fp32 on T4/P100.
+_base_: base.yaml
+model:
+  name: microsoft/mdeberta-v3-base
+training:
+  precision: fp32
+  batch_size: 16
+  grad_accum: 2

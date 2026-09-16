@@ -1,0 +1,5 @@
+# XLM-RoBERTa (100 languages). For the large model use:
+#   --set model.name=xlm-roberta-large training.lr=1e-5 training.batch_size=16 training.grad_accum=2
+_base_: base.yaml
+model:
+  name: xlm-roberta-base

@@ -1,0 +1,4 @@
+# IndicBERT v2 (AI4Bharat) — MLM + Samanantar + transliterated-TLM variant.
+_base_: base.yaml
+model:
+  name: ai4bharat/IndicBERTv2-MLM-Sam-TLM

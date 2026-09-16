@@ -1,0 +1,5 @@
+file,rows,null_text,dup_id,dup_text_exact,dup_text_normalized,mojibake_rows,html_rows,url_rows,emoji_rows,kannada_script_rows,empty_after_clean,words_median,words_p95,words_max
+binary_train,6446,0,0,37,57,923,473,24,934,46,0,8.0,31.0,139
+binary_val,806,0,0,0,0,129,58,2,129,4,0,8.0,32.0,130
+multiclass_train,3159,0,0,13,15,189,249,9,186,5,0,9.0,35.0,130
+multiclass_val,395,0,0,0,0,18,38,3,19,2,0,10.0,35.299999999999955,124

@@ -1,0 +1,6 @@
+key,n_labels,n_rows,labels,task
+ella cm thara evaru adjust aagilla adkke,2,2,Hate | Non-Hate,A
+ivanu jail inda bandaga en madidda gottillva namge,2,2,Hate | Non-Hate,A
+kangres gorment barbeku sidramyyasar cmagbeku karmikara hamaligala kastana bageharisthare,2,2,Hate | Non-Hate,A
+ninuna jilige hakidre desha rajyake nemdi nammagala dudhu tinde hige adutira obhanige hutiro nanna makala nivu rajakarnigalu,2,2,Geo-political | Political,B
+surprise enuo ellappa edhella namma janru madkhaluo kharma khandha,2,2,Geo-political | Others,B

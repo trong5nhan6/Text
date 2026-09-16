@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+
+# Generated from data/raw by src/data/preprocessing.py
+data/processed/
+
+# Run artifacts: reproducible from code + configs, never committed
+checkpoints/
+logs/
+results/

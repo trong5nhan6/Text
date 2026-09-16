@@ -1,0 +1,8 @@
+# ModernBERT is trained on English + code only -> expected to be weak on Kanglish.
+# Kept as an ablation / reference point for the system paper. Needs transformers >= 4.48.
+_base_: base.yaml
+model:
+  name: answerdotai/ModernBERT-base
+  pooling: mean
+training:
+  lr: 3.0e-5

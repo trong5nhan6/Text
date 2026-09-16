@@ -1,0 +1,4 @@
+# Multilingual BERT — same family as the BERT baseline in the HASTIKA paper.
+_base_: base.yaml
+model:
+  name: bert-base-multilingual-cased

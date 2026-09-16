@@ -1,0 +1,4 @@
+# MuRIL — pretrained on 17 Indian languages incl. transliterated (romanised) text. First choice for Kanglish.
+_base_: base.yaml
+model:
+  name: google/muril-base-cased

@@ -1,0 +1,133 @@
+{
+ "dup_conflicts": {
+  "A": 3,
+  "B": 2
+ },
+ "val_text_seen_in_train": {
+  "A": 14,
+  "B": 5
+ },
+ "label_A": {
+  "Non-Hate": 3286,
+  "Hate": 3160
+ },
+ "label_B": {
+  "Gender": 1362,
+  "Political": 559,
+  "Others": 449,
+  "Religion": 382,
+  "Violence": 221,
+  "Geo-political": 186
+ },
+ "imbalance_ratio_B": 7.32,
+ "vocab": {
+  "train_types": 21277,
+  "hapax_ratio": 0.703,
+  "val_OOV_token_rate": 0.21
+ },
+ "id_overlap": {
+  "id_range": [
+   0,
+   8057
+  ],
+  "unique_ids_all_files": 7616,
+  "A_train∩A_val": 0,
+  "B_train∩B_val": 0,
+  "B_train ids in A_train": 2515,
+  "…of which Hate": 2515,
+  "B_train ids in A_val": 324,
+  "B_val ids in A_train": 319,
+  "B_val ids in A_val": 32,
+  "B ids not in any A file (likely A-test)": 364,
+  "A_train Hate without B label": 326,
+  "text identical for shared ids": true
+ },
+ "tfidf_lr_5fold": {
+  "A": {
+   "macro_f1": 0.8135,
+   "accuracy": 0.8137,
+   "per_class": {
+    "Hate": {
+     "precision": 0.8158658497258948,
+     "recall": 0.8006329113924051,
+     "f1-score": 0.8081776074109567,
+     "support": 3160.0
+    },
+    "Non-Hate": {
+     "precision": 0.8116591928251121,
+     "recall": 0.8262325015216068,
+     "f1-score": 0.8188810134218066,
+     "support": 3286.0
+    },
+    "accuracy": 0.8136829041265902,
+    "macro avg": {
+     "precision": 0.8137625212755035,
+     "recall": 0.8134327064570059,
+     "f1-score": 0.8135293104163817,
+     "support": 6446.0
+    },
+    "weighted avg": {
+     "precision": 0.8137214075018843,
+     "recall": 0.8136829041265902,
+     "f1-score": 0.8136339201865777,
+     "support": 6446.0
+    }
+   }
+  },
+  "B": {
+   "macro_f1": 0.5988,
+   "accuracy": 0.6885,
+   "per_class": {
+    "Gender": {
+     "precision": 0.7367399741267788,
+     "recall": 0.8362701908957415,
+     "f1-score": 0.7833562585969739,
+     "support": 1362.0
+    },
+    "Political": {
+     "precision": 0.7761467889908257,
+     "recall": 0.7567084078711985,
+     "f1-score": 0.7663043478260869,
+     "support": 559.0
+    },
+    "Others": {
+     "precision": 0.4578313253012048,
+     "recall": 0.42316258351893093,
+     "f1-score": 0.4398148148148148,
+     "support": 449.0
+    },
+    "Religion": {
+     "precision": 0.7195767195767195,
+     "recall": 0.7120418848167539,
+     "f1-score": 0.7157894736842105,
+     "support": 382.0
+    },
+    "Violence": {
+     "precision": 0.4634146341463415,
+     "recall": 0.2579185520361991,
+     "f1-score": 0.3313953488372093,
+     "support": 221.0
+    },
+    "Geo-political": {
+     "precision": 0.618421052631579,
+     "recall": 0.5053763440860215,
+     "f1-score": 0.5562130177514792,
+     "support": 186.0
+    },
+    "accuracy": 0.6885090218423552,
+    "macro avg": {
+     "precision": 0.6286884157955749,
+     "recall": 0.5819129938708075,
+     "f1-score": 0.5988122102517958,
+     "support": 3159.0
+    },
+    "weighted avg": {
+     "precision": 0.6759073826150387,
+     "recall": 0.6885090218423552,
+     "f1-score": 0.6783468752256663,
+     "support": 3159.0
+    }
+   }
+  }
+ }
+}

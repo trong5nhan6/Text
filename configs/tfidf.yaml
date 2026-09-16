@@ -1,0 +1,12 @@
+# B0 — TF-IDF (char_wb 2-5 + word 1-2) + linear classifier. CPU only, a few minutes.
+_base_: base.yaml
+model:
+  type: tfidf
+  clf: lr                   # lr | svm
+  C_grid: [0.5, 1, 2, 4, 8, 16]   # best C chosen by OOF macro-F1 (svm: use smaller values, e.g. [0.05, 0.1, 0.25, 0.5, 1])
+  char_ngram: [2, 5]
+  word_ngram: [1, 2]
+  max_features: 300000
+  class_weight: auto        # auto (a: none, b: balanced) | none | balanced
+checkpoint:
+  save: none
