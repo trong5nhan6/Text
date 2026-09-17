@@ -22,9 +22,11 @@ def _load(path: Path) -> dict:
 
 def _parse_value(v: str):
     val = yaml.safe_load(v)
-    if isinstance(val, str):                 # YAML 1.1 reads "1e-3" as a string
+    if isinstance(val, str):
+        if val.strip() in ("None", "none", "NONE"):   # YAML only knows null/~; Python prints None
+            return None
         try:
-            val = float(val)
+            val = float(val)                 # YAML 1.1 reads "1e-3" as a string
         except ValueError:
             pass
     return val
@@ -81,11 +83,19 @@ def dump(cfg: dict, path):
 _VOLATILE = {"paths", "run_name", "run_suffix", "config_name"}
 
 
+def _drop_none(node):
+    """A null option means "not set", which is the same as the key not being there. Dropping
+    these keeps runs finished before an option existed from looking like a config change."""
+    if isinstance(node, dict):
+        return {k: _drop_none(v) for k, v in node.items() if v is not None}
+    return node
+
+
 def training_signature(cfg: dict) -> dict:
     """What a run's results actually depend on. Compared against the stored config.yaml to
     refuse resuming a run whose hyper-parameters changed -- so it must ignore every key the
     model does not read, or unrelated edits to base.yaml would invalidate finished runs."""
-    sig = copy.deepcopy({k: v for k, v in cfg.items() if k not in _VOLATILE})
+    sig = _drop_none(copy.deepcopy({k: v for k, v in cfg.items() if k not in _VOLATILE}))
     sig.pop("checkpoint", None)                          # saving weights cannot change them
     if sig.get("model", {}).get("type") == "tfidf":
         sig.pop("training", None)                        # the transformer block is unused here

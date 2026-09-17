@@ -1,16 +1,38 @@
 import json
+import re
+from collections import Counter
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 
+_BLOCK_RE = re.compile(r"^(?P<prefix>.+?)\.(?P<idx>\d+)\.")
+
+
+def block_layout(backbone):
+    """-> (container prefix, number of blocks) for the repeated transformer block.
+
+    Found from the parameter names rather than hard-coded, because the families differ:
+    BERT / XLM-R / IndicBERT / mDeBERTa name it `encoder.layer.{i}` with 12 blocks, while
+    ModernBERT names it `layers.{i}` and has 22.
+    """
+    names = [n for n, _ in backbone.named_parameters()]
+    prefixes = Counter(m.group("prefix") for n in names if (m := _BLOCK_RE.match(n)))
+    if not prefixes:
+        return None, 0
+    prefix = prefixes.most_common(1)[0][0]
+    idx = {int(m.group("idx")) for n in names
+           if (m := _BLOCK_RE.match(n)) and m.group("prefix") == prefix}
+    return prefix, max(idx) + 1
+
 
 class TransformerClassifier(nn.Module):
     """Pretrained encoder + pooling + dropout + linear head."""
 
     def __init__(self, backbone_name: str, num_labels: int, pooling: str = "cls",
-                 dropout: float = 0.1, backbone_config=None):
+                 dropout: float = 0.1, backbone_config=None,
+                 unfreeze_last_n_blocks=None, freeze_embeddings=None):
         super().__init__()
         if backbone_config is None:                      # training: load pretrained weights
             # .float() is not redundant: some published checkpoints store fp16 weights
@@ -28,6 +50,60 @@ class TransformerClassifier(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.head = nn.Linear(self.backbone.config.hidden_size, num_labels)
         nn.init.normal_(self.head.weight, std=0.02); nn.init.zeros_(self.head.bias)
+        self.freeze_summary = self._apply_freezing(unfreeze_last_n_blocks, freeze_embeddings)
+
+    def _apply_freezing(self, unfreeze_last_n, freeze_emb) -> str:
+        """Freeze everything below the last `unfreeze_last_n` blocks. The head and the modules
+        that sit *above* the last block (mDeBERTa's encoder.LayerNorm, ModernBERT's final_norm)
+        always stay trainable -- freezing those would cut the path the gradient needs.
+        `freeze_emb=None` means: follow the block setting."""
+        if freeze_emb is None:
+            freeze_emb = unfreeze_last_n is not None
+        prefix, n_blocks = block_layout(self.backbone)
+        total = sum(p.numel() for p in self.parameters())
+
+        if unfreeze_last_n is not None:
+            if prefix is None:
+                raise ValueError(f"no transformer blocks found in {self.meta['backbone_name']}; "
+                                 f"unfreeze_last_n_blocks cannot be applied")
+            if not 0 <= unfreeze_last_n <= n_blocks:
+                raise ValueError(f"unfreeze_last_n_blocks={unfreeze_last_n} out of range for "
+                                 f"{self.meta['backbone_name']} ({n_blocks} blocks)")
+        first_trainable = None if unfreeze_last_n is None else n_blocks - unfreeze_last_n
+
+        n_pooler = 0
+        for name, p in self.backbone.named_parameters():
+            if name.startswith("pooler."):
+                # BERT-family only, and dead weight here: forward() reads last_hidden_state, never
+                # pooler_output, so these never receive a gradient. Freeze them so they stay out of
+                # the optimizer and out of the trainable count.
+                p.requires_grad_(False)
+                n_pooler += p.numel()
+                continue
+            if "embed" in name.lower():
+                p.requires_grad_(not freeze_emb)
+                continue
+            if first_trainable is None:
+                continue                                  # blocks untouched: train everything
+            m = _BLOCK_RE.match(name)
+            if m and m.group("prefix") == prefix:
+                p.requires_grad_(int(m.group("idx")) >= first_trainable)
+            # anything else is the tail above the blocks -> left trainable
+
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        parts = []
+        if first_trainable is None:
+            parts.append(f"all {n_blocks} blocks trainable" if n_blocks
+                         else "block structure not detected; nothing frozen")
+        elif unfreeze_last_n == 0:
+            parts.append(f"all {n_blocks} blocks frozen (head only)")
+        else:
+            parts.append(f"blocks 0-{first_trainable - 1} frozen, "
+                         f"{unfreeze_last_n}/{n_blocks} trainable")
+        parts.append("embeddings " + ("frozen" if freeze_emb else "trainable"))
+        parts.append(f"{trainable / 1e6:.1f}M / {total / 1e6:.1f}M params "
+                     f"({100 * trainable / total:.1f}%)")
+        return " | ".join(parts)
 
     def forward(self, input_ids, attention_mask, token_type_ids=None, **_):
         kw = {"input_ids": input_ids, "attention_mask": attention_mask}

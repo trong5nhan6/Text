@@ -21,6 +21,13 @@ model:
   name: google/muril-base-cased
   pooling: cls              # cls | mean
   dropout: 0.1
+  # Partial fine-tuning. null keeps today's behaviour (everything trains).
+  #   4 -> only the last 4 transformer blocks (+ the head and the norms above them)
+  #   0 -> the whole backbone frozen, head only (linear probing)
+  # Blocks are found from the parameter names, so this works for ModernBERT's 22 `layers.{i}`
+  # as well as the 12 `encoder.layer.{i}` of the BERT family.
+  unfreeze_last_n_blocks: null
+  freeze_embeddings: null   # null = follow unfreeze_last_n_blocks | true | false
 
 training:
   epochs: 6                 # also the LR schedule length: warmup 10% then linear decay to 0 at

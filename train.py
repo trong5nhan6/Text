@@ -83,6 +83,7 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     tokenizer = build_tokenizer(cfg)
     model = build_model(cfg, n_labels)
     log.info(f"san sang sau {time.time() - t0:.0f}s")
+    log.info(f"freeze: {model.freeze_summary}")
     trainer = Trainer(cfg, model, tokenizer, build_loss(loss_name, cfg["training"], counts), device, log)
     best = trainer.fit(fit, ev)
 

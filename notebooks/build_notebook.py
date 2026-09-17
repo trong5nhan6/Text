@@ -42,6 +42,8 @@ KNOBS = [
     ("--- model ---", None),
     ("model.pooling", "cls | mean"),
     ("model.dropout", None),
+    ("model.unfreeze_last_n_blocks", "null = train tat ca | 4 = chi 4 khoi cuoi | 0 = chi head"),
+    ("model.freeze_embeddings", "null = theo khoa tren | true | false"),
     ("seed", None),
     ("--- dia ---", None),
     ("checkpoint.save", "best | none   (none tiet kiem ~0.5 GB moi run)"),
