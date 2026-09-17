@@ -332,11 +332,24 @@ code('''!python inference.py --task a --runs tfidf_lr tfidf_svm muril_ce_s42 rob
 # test, từ checkpoint:
 # !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 --input data/raw/multiclass_test_inputs.csv --tag ens1''')
 
+md("""### Gom file nộp để tải về
+
+Cell dưới copy mọi `submission.zip` ra một chỗ rồi **nén cả thư mục thành một file duy nhất**
+để tải về một lần thay vì bấm từng cái.
+
+> ⚠️ **`submissions_all.zip` là để TẢI VỀ, không phải để NỘP.** Nó là zip chứa các zip. Codabench
+> chỉ nhận zip phẳng chứa đúng một `predictions.csv` — tức là từng file `{task}_val_{run}.zip`
+> bên trong. Giải nén `submissions_all.zip` rồi nộp file con tương ứng.""")
 code('''import glob, shutil
 out = '/kaggle/working/submissions'
 os.makedirs(out, exist_ok=True)
 for z in glob.glob('results/submissions/*/submission.zip'):
     shutil.copy(z, f"{out}/{os.path.basename(os.path.dirname(z))}.zip")
+
+# nen ca thu muc thanh 1 file -> /kaggle/working/submissions_all.zip
+bundle = shutil.make_archive('/kaggle/working/submissions_all', 'zip', out)
+print(f"da gom {len(os.listdir(out))} file nop")
+print(f"bundle: {bundle}  ({os.path.getsize(bundle) / 1024:.0f} KB)  <- tai ve file nay")
 !ls -la /kaggle/working/submissions''')
 
 nb = {"cells": cells,
