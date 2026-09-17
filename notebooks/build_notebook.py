@@ -216,25 +216,25 @@ code(_overrides_cell())
 
 md("""### Train
 
-Cấu hình hiện tại: `epochs: 30` là **trần**, `early_stopping_patience: 5` mới là thứ quyết định
-lúc dừng — train tiếp cho tới khi macro-F1 không cải thiện suốt 5 epoch liền.
+`epochs: 6`, `batch_size: 32`, `lr: 2e-5` — công thức chuẩn khi fine-tune BERT trên vài nghìn dòng.
+`early_stopping_patience: 5` cố ý ≥ `epochs`: chạy trọn lịch để LR kịp anneal về 0, rồi giữ trọng số
+của epoch tốt nhất.
 
-Trên T4, MuRIL/XLM-R base với `batch_size: 64` mất ~40–60 giây mỗi epoch (task A ~90 step,
-task B ~45 step). Thực tế thường dừng quanh epoch 8–15, tức **~8–15 phút mỗi run**, 4 run
-≈ 35–60 phút. Nếu sắp hết giờ session thì giảm `CONFIGS` hoặc `TASKS` lại.
+Trên T4 mỗi run ≈ **4–7 phút** (task A 180 step/epoch, task B 89 step/epoch).
+6 config × 2 task ≈ 60–80 phút.
 
 - Run đã xong → chạy lại sẽ bỏ qua, không train lại.
 - Mỗi run lưu 1 checkpoint fp16 (~0.5 GB với model base); `/kaggle/working` giới hạn ~20 GB.
 
-> **`epochs` vừa là trần vừa là độ dài lịch learning rate.** `trainer.py` tính
-> `steps = step_mỗi_epoch × epochs`, warmup = 10% số đó, rồi LR giảm tuyến tính về 0 ở step cuối.
-> Vì `epochs: 30` lớn hơn nhiều so với lúc thực sự dừng, warmup kéo dài 3 epoch đầu và LR **gần như
-> không giảm** trong suốt quá trình train (epoch 6 vẫn còn ~89% đỉnh, epoch 15 còn ~56%). Đây là
-> đánh đổi đã biết: model chạy ở LR cao ổn định thay vì có giai đoạn anneal cuối. Muốn có anneal thì
-> đặt `training.epochs` sát số epoch kỳ vọng — sửa được ngay ở cell OVERRIDES phía trên.""")
+> **Vì sao 6 chứ không phải 30.** `trainer.py` tính `steps = step_mỗi_epoch × epochs`, warmup 10%,
+> rồi LR giảm tuyến tính về 0 ở step cuối — nên `epochs` **vừa là trần vừa là độ dài lịch LR**.
+> Lần chạy với `epochs: 30` cho `best_epoch` rơi vào 9–17 và điểm không hơn gì train 2 epoch:
+> warmup ngốn 3 epoch đầu, LR tới epoch 6 vẫn còn ~89% đỉnh, và early stopping rốt cuộc chỉ nhặt
+> **đỉnh nhiễu** trên lát eval 315–639 dòng. Ở 6 epoch, warmup 0,6 epoch và LR anneal đúng lúc
+> model hội tụ.""")
 code('''import time
 
-CONFIGS = ['muril', 'roberta']        # thêm: 'indicbert', 'bert', 'deberta', 'modernbert'
+CONFIGS = ['muril', 'roberta', 'indicbert', 'bert', 'deberta', 'modernbert']  # bo bot neu thieu gio
 TASKS   = ['a', 'b']
 
 t0 = time.time()
@@ -249,6 +249,17 @@ for i, c in enumerate(CONFIGS):
         !python train.py --config configs/{c}.yaml --task {t} {ARGS}
 print("")
 print(f"xong {len(CONFIGS) * len(TASKS)} run trong {(time.time() - t0) / 60:.1f} phut")''')
+
+md("""**Task B — thử `ce` thay cho `wce`.** Mặc định Task B dùng weighted CE để bù lệch lớp 7,3 lần.
+Nhưng ở lần chạy trước `roberta_wce_s42` chỉ đạt accuracy 0,6444 — thấp bất thường, dấu hiệu class
+weight đẩy quá tay sang lớp hiếm và bào mòn lớp lớn. `ce` là đối chứng cần có.
+
+Không cần `--run_suffix`: tên run đã chứa loss, nên chúng nằm ở `results/b/<config>_ce_s42`,
+tách hẳn với `<config>_wce_s42`.""")
+code('''for c in CONFIGS:
+    print("")
+    print("=" * 72); print(f"task b | {c} | loss=ce"); print("=" * 72, flush=True)
+    !python train.py --config configs/{c}.yaml --task b --set training.loss=ce''')
 
 code('''# Ví dụ biến thể:
 # !python train.py --config configs/muril.yaml --task b --set training.loss=focal
@@ -267,9 +278,9 @@ display(pd.read_csv('results/metrics.csv'))
 !python evaluate.py --task a
 !python evaluate.py --task b''')
 
-code('''# blend + tối ưu trọng số trên lát eval (đổi tên run theo bảng trên)
-!python evaluate.py --task a --runs tfidf_lr tfidf_svm muril_ce_s42 roberta_ce_s42 --optimize
-!python evaluate.py --task b --runs tfidf_lr tfidf_svm muril_wce_s42 roberta_wce_s42 --optimize''')
+code('''# blend MOI run cua task do; trong so tim bang greedy forward selection tren lat eval
+!python evaluate.py --task a --optimize
+!python evaluate.py --task b --optimize''')
 
 code('''from IPython.display import Image, display
 for t in ('a', 'b'):
@@ -326,10 +337,18 @@ for z in sorted(glob.glob('results/submissions/*/submission.zip')):
     n = sum(1 for _ in open(f'{d}/predictions.csv', encoding='utf-8')) - 1
     print(f"{os.path.basename(d):45s} {n:5d} dong")''')
 
-md("**Cách 2 — ensemble** (thường tốt hơn; đổi tên run và trọng số theo bảng ở mục 4):")
-code('''!python inference.py --task a --runs tfidf_lr tfidf_svm muril_ce_s42 roberta_ce_s42 --split val --tag ens3
-!python inference.py --task b --runs tfidf_lr tfidf_svm muril_wce_s42 roberta_wce_s42 --split val --tag ens3
-# test, từ checkpoint:
+md("""**Cách 2 — ensemble** (thường tốt hơn). Cell dưới đọc thẳng trọng số mà `evaluate.py --optimize`
+vừa tìm được ở mục 4 (`results/{task}/_blend/blend.json`), nên không phải chép tay tên run.""")
+code('''import json
+for t in ('a', 'b'):
+    b = json.load(open(f'results/{t}/_blend/blend.json'))
+    keep = [(r, w) for r, w in zip(b['runs'], b['weights']) if w > 0]
+    print(f"task {t}: macro-F1 {b['macro_f1']:.4f} | " + ", ".join(f"{r}:{w:g}" for r, w in keep))
+    runs = " ".join(r for r, _ in keep)
+    ws   = " ".join(str(w) for _, w in keep)
+    !python inference.py --task {t} --runs {runs} --weights {ws} --split val --tag ens
+
+# test, tu checkpoint (run train truoc khi co test):
 # !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 --input data/raw/multiclass_test_inputs.csv --tag ens1''')
 
 code('''import glob, shutil

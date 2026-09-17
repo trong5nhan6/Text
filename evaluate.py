@@ -5,7 +5,7 @@ Compare runs on the held-out slice and evaluate a blend of them.
   python evaluate.py --task b                                   # all runs of task b
   python evaluate.py --task b --runs tfidf_lr muril_wce_s42     # selected runs + their average
   python evaluate.py --task b --runs tfidf_lr muril_wce_s42 --weights 0.3 0.7
-  python evaluate.py --task b --runs tfidf_lr muril_wce_s42 --optimize   # search blend weights
+  python evaluate.py --task b --optimize                        # blend every run, weights searched
 
 Writes per-class reports + confusion matrices to results/{task}/{run}/ (and results/{task}/_blend/),
 and refreshes results/metrics.csv.
@@ -28,9 +28,13 @@ def blend(probs, weights):
     return sum(wi * p for wi, p in zip(w, probs))
 
 
-def optimize_weights(probs, y, step=0.1):
+GRID_MAX_RUNS = 4       # 11**4 = 14641 blends is a few seconds; 11**8 would be 214 million
+
+
+def _grid_weights(probs, y, step=0.1):
+    """Exhaustive search of the weight simplex. Only viable for a handful of runs."""
     grid = np.round(np.arange(0, 1 + 1e-9, step), 3)
-    best = (None, -1)
+    best = (None, -1.0)
     for w in itertools.product(grid, repeat=len(probs)):
         if abs(sum(w) - 1) > 1e-6:
             continue
@@ -40,12 +44,37 @@ def optimize_weights(probs, y, step=0.1):
     return best
 
 
+def _greedy_weights(probs, y, iters=40):
+    """Greedy forward selection with replacement (Caruana et al., 2004): start from nothing and
+    repeatedly add the run that most improves the blend, a run being addable again, so its number
+    of picks is its weight. Costs iters*n blends instead of 11**n."""
+    n = len(probs)
+    counts, total = np.zeros(n), np.zeros_like(probs[0])
+    best = (np.ones(n), -1.0)                       # fall back to the plain average
+    for _ in range(iters):
+        # argmax of a sum is argmax of a mean, so the running total needs no normalising
+        scores = [compute_metrics(y, (total + p).argmax(1))["macro_f1"] for p in probs]
+        j = int(np.argmax(scores))
+        total, counts[j] = total + probs[j], counts[j] + 1
+        if scores[j] > best[1]:
+            best = (counts.copy(), scores[j])
+    return list(best[0]), best[1]
+
+
+def optimize_weights(probs, y):
+    """Blend weights fitted on the held-out slice -- optimistic by construction, so treat the
+    blend's reported score as an upper bound, the same way a tuned C is."""
+    return (_grid_weights(probs, y) if len(probs) <= GRID_MAX_RUNS
+            else _greedy_weights(probs, y))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", choices=["a", "b"], required=True)
     ap.add_argument("--runs", nargs="*")
     ap.add_argument("--weights", nargs="*", type=float)
-    ap.add_argument("--optimize", action="store_true", help="grid-search blend weights (step 0.1)")
+    ap.add_argument("--optimize", action="store_true",
+                    help="fit blend weights on the held-out slice (grid up to 4 runs, then greedy)")
     ap.add_argument("--config", default="configs/base.yaml")
     a = ap.parse_args()
 

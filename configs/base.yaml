@@ -23,8 +23,11 @@ model:
   dropout: 0.1
 
 training:
-  epochs: 30
-  batch_size: 64
+  epochs: 6                 # also the LR schedule length: warmup 10% then linear decay to 0 at
+                            # the last step, so this must stay close to where training converges.
+                            # Fine-tuning on 2.8k-5.7k rows peaks at 2-4 epochs; at 30 the LR never
+                            # annealed and every epoch past ~3 was noise.
+  batch_size: 32            # standard pairing with lr 2e-5
   eval_batch_size: 64
   grad_accum: 1
   lr: 2.0e-5
@@ -38,10 +41,9 @@ training:
   class_weight: sqrt_inv    # none | inverse | sqrt_inv  (used by wce / focal)
   focal_gamma: 2.0
   label_smoothing: 0.0
-  early_stopping_patience: 5   # epochs is a ceiling here, not a target: training stops when
-                              # macro-F1 has not improved for this many epochs. Note that
-                              # epochs also sets the LR schedule length (see trainer.py),
-                              # so with epochs: 30 the LR stays near its peak throughout.
+  early_stopping_patience: 5   # >= epochs on purpose: run the full schedule so the LR anneals,
+                              # and keep the best epoch's weights. Stopping early would cut the
+                              # anneal short, which is where most of the gain is.
 
 checkpoint:
   save: best                # best | none   (best = best epoch of every fold)
