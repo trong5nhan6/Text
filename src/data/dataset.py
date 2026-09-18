@@ -38,6 +38,22 @@ def text_columns(cfg):
     return TEXT_COLUMNS[tt]
 
 
+def infer_columns(cfg):
+    """Which views to average over at prediction time. data.tta uses both scripts regardless of
+    what the model trained on; without it, prediction uses the training view."""
+    cols = text_columns(cfg)
+    if not cfg.get("data", {}).get("tta"):
+        return ["text"] if cols == ["text", "text_kn"] else cols
+    return ["text", "text_kn"]
+
+
+def swap_views(df, cols):
+    """The same rows seen through the other script, with the column names the fitted model
+    expects: a model fitted on `text` is handed text_kn under the name `text`."""
+    other = {"text": "text_kn", "text_kn": "text"}
+    return df[[other[c] for c in cols]].rename(columns={other[c]: c for c in cols})
+
+
 def require_columns(df, cols, what="data"):
     missing = [c for c in cols if c not in df.columns]
     if missing:

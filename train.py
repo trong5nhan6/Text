@@ -24,8 +24,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.data.dataset import (label_names, load_split, require_columns, split_rows,
-                              text_columns)
+from src.data.dataset import (infer_columns, label_names, load_split, require_columns,
+                              split_rows, text_columns)
 from src.data.preprocessing import ensure_processed
 from src.evaluation.metrics import compute_metrics, rebuild_metrics_table
 from src.evaluation.submission import write_submission
@@ -74,25 +74,23 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_name = resolve_loss(cfg)
-    cols = text_columns(cfg)
-    fit, ev = split_rows(require_columns(train, cols, "train"))
-    require_columns(val, cols, "val")
+    cols, infer_cols = text_columns(cfg), infer_columns(cfg)
+    fit, ev = split_rows(require_columns(train, set(cols) | set(infer_cols), "train"))
+    require_columns(val, infer_cols, "val")
+    if test is not None:
+        require_columns(test, infer_cols, "test")
 
     # An encoder shares its parameters across both scripts, so here "both" means extra rows,
     # not extra features. Only the fit slice is duplicated: a Kannada copy of an eval row is
-    # the same comment, and putting it in training would leak. Scoring stays on `text` so the
-    # numbers line up with every other run.
-    view = cols[-1] if cols != ["text", "text_kn"] else "text"
+    # the same comment, and putting it in training would leak.
     if cols == ["text", "text_kn"]:
-        fit = pd.concat([fit, fit.assign(text=fit.text_kn)], ignore_index=True)
-    elif view != "text":
-        fit, ev = fit.assign(text=fit[view]), ev.assign(text=ev[view])
-        val = val.assign(text=val[view])
-        if test is not None:
-            test = test.assign(text=test[view])
+        fit, train_col = pd.concat([fit, fit.assign(text=fit.text_kn)], ignore_index=True), "text"
+    else:
+        train_col = cols[0]
     counts = np.bincount(fit.y, minlength=n_labels)
     log.info(f"device={device} model={cfg['model']['name']} loss={loss_name} "
              f"precision={cfg['training']['precision']} | text_type={cfg['data']['text_type'] or 'latin'}"
+             f"{' +tta' if cfg['data'].get('tta') else ''}"
              f" | {len(fit)} fit / {len(ev)} eval")
 
     set_seed(cfg["seed"])
@@ -103,10 +101,16 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     log.info(f"san sang sau {time.time() - t0:.0f}s")
     log.info(f"freeze: {model.freeze_summary}")
     trainer = Trainer(cfg, model, tokenizer, build_loss(loss_name, cfg["training"], counts), device, log)
-    best = trainer.fit(fit, ev)
+    best = trainer.fit(fit.assign(text=fit[train_col]), ev.assign(text=ev[train_col]))
 
-    out = {"eval": best["pred"], "val": trainer.predict(val.text),
-           "test": trainer.predict(test.text) if test is not None else None,
+    def predict(df):
+        """Average over the requested views. fit() leaves the model at its best epoch, so one
+        view here reproduces best["pred"] exactly -- which is why it is reused when tta is off."""
+        return sum(trainer.predict(df[c]) for c in infer_cols) / len(infer_cols)
+
+    single = infer_cols == [train_col]
+    out = {"eval": best["pred"] if single else predict(ev),
+           "val": predict(val), "test": None if test is None else predict(test),
            "extra": {"model": cfg["model"]["name"], "loss": loss_name, "best_epoch": best["epoch"]}}
     json.dump(best["history"], open(run_dir / "history.json", "w"), indent=1)
     if cfg["checkpoint"]["save"] == "best":

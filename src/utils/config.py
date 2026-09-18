@@ -65,8 +65,9 @@ def resolve_loss(cfg: dict) -> str:
 
 def text_suffix(cfg: dict) -> str:
     """Runs on a different view of the text must not share a results/ folder."""
-    tt = cfg.get("data", {}).get("text_type")
-    return "" if tt in (None, "latin") else f"_{tt}"
+    d = cfg.get("data", {})
+    tt = d.get("text_type")
+    return ("" if tt in (None, "latin") else f"_{tt}") + ("_tta" if d.get("tta") else "")
 
 
 def run_name(cfg: dict) -> str:

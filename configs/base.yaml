@@ -20,6 +20,11 @@ data:
   #                         transformer: the Kannada copy added as extra training rows
   # The run name gains _kn / _both, so the three land in separate results/ folders.
   text_type: null
+  # Test-time augmentation, TRANSFORMERS ONLY: predict each row through both scripts and
+  # average the probabilities. The eval rows do not change, so the score stays comparable with
+  # every other run; it costs one extra forward pass and the run name gains _tta.
+  # Rejected for tfidf, where the two scripts share no n-grams and the second view is empty.
+  tta: null
   val_ratio: 0.1            # one 90/10 split: fit on 90%, score on the held-out 10%
   split_seed: 42            # keep fixed -> every run shares the split, so runs can be blended
   max_len: 96               # 95% of comments < 35 words

@@ -100,12 +100,23 @@ def fit_and_score(cfg, train, val, test, n_labels, log=print):
     grid = mcfg.get("param_grid") or mcfg.get("C_grid") or DEFAULT_GRIDS[kind]
     unit = "C" if kind in ("lr", "svm") else "alpha"
     cols = text_columns(cfg)
+    if cfg.get("data", {}).get("tta"):
+        # Measured: feeding Kannada to a Latin-fitted model leaves 25k of 75M feature slots
+        # non-zero, so it predicts one class for 634 of 639 rows -- at 0.93 confidence, because
+        # with no features the intercept decides. Averaging that in only drags the real
+        # prediction down (0.8215 -> 0.5988). The two scripts share no characters, so there is
+        # no second view for a bag-of-n-grams to average over; use text_type=both instead,
+        # which puts both scripts on the same row. TTA is for the transformers, whose encoder
+        # is shared across scripts.
+        raise SystemExit("data.tta khong dung duoc voi model.type=tfidf: dac trung char n-gram "
+                         "cua hai he chu roi rac nhau. Dung data.text_type=both thay the.")
     if cols != ["text"]:
         log(f"  text_type={cfg['data']['text_type']} -> dac trung tu cot {cols}")
     fit, ev = split_rows(require_columns(train, cols, "train"))
     require_columns(val, cols, "val")
     if test is not None:
         require_columns(test, cols, "test")
+
     best = None
     for param in grid:
         pipe = build_tfidf(mcfg, param, balanced, cfg.get("seed", 42), cols).fit(fit[cols], fit.y)
