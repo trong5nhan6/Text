@@ -21,10 +21,19 @@ CACHE = ROOT / "data" / "xlit_kn.json"
 
 
 def _stub_urduhack():
-    """ai4bharat.transliteration imports urduhack at module level to normalise Shahmukhi, and
-    urduhack drags in TensorFlow. We only ever ask for Kannada, so register a no-op module
-    under that name first. Must happen in every process that imports XlitEngine, which is why
-    it lives here rather than in the notebook."""
+    """Everything that has to happen before `from ai4bharat.transliteration import XlitEngine`.
+
+    (1) ai4bharat.transliteration imports urduhack at module level to normalise Shahmukhi, and
+        urduhack drags in TensorFlow. We only ever ask for Kannada, so register a no-op module
+        under that name first.
+    (2) Also applies the torch.load patch below. That is not what the name says, but notebook
+        cells do not update on `git pull` -- only src/ does -- so a cell written before the two
+        were split still calls just this one. Keeping it a superset means such a cell works
+        after a pull instead of failing on a fix that is already in the repo.
+
+    Must run in every process that imports XlitEngine, which is why it lives here and not in
+    the notebook.
+    """
     import sys
     import types
     if "urduhack" not in sys.modules:
@@ -34,6 +43,7 @@ def _stub_urduhack():
             stub = types.ModuleType("urduhack")
             stub.normalize = lambda s: s
             sys.modules["urduhack"] = stub
+    _allow_fairseq_checkpoint()
 
 
 def _allow_fairseq_checkpoint():
