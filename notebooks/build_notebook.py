@@ -187,23 +187,25 @@ held-out. Giá trị được chọn hiện trong `results/metrics.csv`, ví d�
 
 Chạy cả năm: mỗi run ~10 giây, và **blend của chúng hơn hẳn model đơn tốt nhất** — `cnb` tuy điểm
 thấp nhưng chỉ đồng thuận 73–79% với nhóm tuyến tính nên đóng góp nhiều nhất cho ensemble.""")
-code('''import time
+code('''import itertools, time
 
-CLFS  = ['lr', 'svm', 'ridge', 'cnb', 'sgd']
-TASKS_ML = ['a', 'b']
+CLFS       = ['lr', 'svm', 'ridge', 'cnb', 'sgd']
+TASKS_ML   = ['a', 'b']
+TEXT_TYPES = ['latin']        # <- doi o day. them 'kn', 'both' de chay ca ba goc nhin
+                              #    latin = chu Latin goc | kn = chu Kannada | both = ca hai
+                              #    ['latin', 'kn', 'both'] -> 30 run, ~5 phut
 
+combos = list(itertools.product(CLFS, TASKS_ML, TEXT_TYPES))
 t0 = time.time()
-for i, c in enumerate(CLFS):
-    for j, t in enumerate(TASKS_ML):
-        n = i * len(TASKS_ML) + j + 1
-        print("")
-        print("-" * 72)
-        print(f"[{n}/{len(CLFS) * len(TASKS_ML)}]  clf = {c:6s} |  task = {t}  |  "
-              f"+{time.time() - t0:.0f}s")
-        print("-" * 72, flush=True)
-        !python train.py --config configs/tfidf.yaml --task {t} --set model.clf={c}
+for n, (c, t, tt) in enumerate(combos, 1):
+    print("")
+    print("-" * 72)
+    print(f"[{n}/{len(combos)}]  clf = {c:6s} |  task = {t}  |  text_type = {tt:6s} |  "
+          f"+{time.time() - t0:.0f}s")
+    print("-" * 72, flush=True)
+    !python train.py --config configs/tfidf.yaml --task {t} --set model.clf={c} data.text_type={tt}
 print("")
-print(f"xong {len(CLFS) * len(TASKS_ML)} run trong {time.time() - t0:.0f}s")''')
+print(f"xong {len(combos)} run trong {time.time() - t0:.0f}s")''')
 
 md("**Bảng tổng kết + blend ngay** (macro-F1 trên lát held-out; blend dùng greedy forward selection):")
 code('''import pandas as pd
@@ -386,12 +388,25 @@ for t in ('a', 'b'):
 # test, tu checkpoint (run train truoc khi co test):
 # !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 --input data/raw/multiclass_test_inputs.csv --tag ens1''')
 
-code('''import glob, shutil
+code('''import glob, os, shutil
 out = '/kaggle/working/submissions'
-os.makedirs(out, exist_ok=True)
+shutil.rmtree(out, ignore_errors=True)
+os.makedirs(out)
 for z in glob.glob('results/submissions/*/submission.zip'):
     shutil.copy(z, f"{out}/{os.path.basename(os.path.dirname(z))}.zip")
+print(f"gom {len(os.listdir(out))} file nop")
 !ls -la /kaggle/working/submissions''')
+
+md("""Nén cả thư mục thành **một file** để tải về một lần:
+
+> `submissions.zip` là để **tải về**, không phải để nộp — nó là zip chứa các zip. Codabench chỉ
+> nhận zip phẳng chứa đúng một `predictions.csv`, tức là từng file `{task}_val_{run}.zip` bên trong.""")
+code('''%cd /kaggle/working
+!rm -f submissions.zip
+!zip -r -q submissions.zip submissions
+!ls -lh /kaggle/working/submissions.zip
+!unzip -l submissions.zip | head -8
+%cd /kaggle/working/repo''')
 
 def write(filename: str):
     nb = {"cells": list(cells),
