@@ -207,13 +207,18 @@ for n, (c, t, tt) in enumerate(combos, 1):
 print("")
 print(f"xong {len(combos)} run trong {time.time() - t0:.0f}s")''')
 
-md("**Bảng tổng kết + blend ngay** (macro-F1 trên lát held-out; blend dùng greedy forward selection):")
+md("""**Bảng tổng kết + blend ngay** (macro-F1 trên lát held-out; blend dùng greedy forward selection).
+
+> `--tag blend_ml` ghi vào `results/{task}/_blend_ml/`, **tách khỏi** `_blend/` của mục 4.
+> Đây mới chỉ là blend của nhóm ML; blend cuối cùng (ML + transformer) nằm ở mục 4, và cell
+> nộp bài ở mục 5 chỉ đọc `_blend/`. Nhờ vậy chạy lại cell này sau khi train transformer
+> cũng không đè mất blend đầy đủ.""")
 code('''import pandas as pd
 d = pd.read_csv('results/metrics.csv')
 display(d[d.run.str.startswith('tfidf')][['task', 'run', 'macro_f1', 'accuracy', 'model']]
         .sort_values(['task', 'macro_f1'], ascending=[True, False]))
-!python evaluate.py --task a --optimize
-!python evaluate.py --task b --optimize''')
+!python evaluate.py --task a --optimize --tag blend_ml
+!python evaluate.py --task b --optimize --tag blend_ml''')
 
 code('''# Dò tham số mịn hơn quanh giá trị vừa chọn (nhớ --run_suffix, nếu không script từ chối chạy):
 # !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge "model.param_grid=[1,2,3,5,8]" --run_suffix _fine
@@ -337,7 +342,8 @@ results/
 │   └── roberta_ce_s42/             ← configs/roberta.yaml --task a
 ├── b/                              Task B  (loss mặc định là focal nên tên là _focal_)
 │   ├── tfidf_lr/  tfidf_svm/  muril_focal_s42/  roberta_focal_s42/
-│   └── _blend/                     kết quả blend gần nhất
+│   ├── _blend/                     blend ĐẦY ĐỦ (mục 4) — cell nộp bài đọc file này
+│   └── _blend_ml/                  blend riêng nhóm TF-IDF (mục 2), không ảnh hưởng bản nộp
 └── metrics.csv                     1 dòng cho mỗi run, cả 2 task
 checkpoints/{task}/{run}/           trọng số fp16 của run đó
 ```

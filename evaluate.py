@@ -6,9 +6,10 @@ Compare runs on the held-out slice and evaluate a blend of them.
   python evaluate.py --task b --runs tfidf_lr muril_wce_s42     # selected runs + their average
   python evaluate.py --task b --runs tfidf_lr muril_wce_s42 --weights 0.3 0.7
   python evaluate.py --task b --optimize                        # blend every run, weights searched
+  python evaluate.py --task b --optimize --tag blend_ml         # same, written to results/b/_blend_ml/
 
-Writes per-class reports + confusion matrices to results/{task}/{run}/ (and results/{task}/_blend/),
-and refreshes results/metrics.csv.
+Writes per-class reports + confusion matrices to results/{task}/{run}/ (and results/{task}/_{tag}/,
+_blend by default), and refreshes results/metrics.csv.
 """
 import argparse
 import itertools
@@ -75,6 +76,10 @@ def main():
     ap.add_argument("--weights", nargs="*", type=float)
     ap.add_argument("--optimize", action="store_true",
                     help="fit blend weights on the held-out slice (grid up to 4 runs, then greedy)")
+    ap.add_argument("--tag", default="blend",
+                    help="blend output dir: results/{task}/_{tag}/. Use a separate tag for a "
+                         "partial blend (e.g. --tag blend_ml before the transformers are trained), "
+                         "so it cannot overwrite the full one that inference.py reads.")
     ap.add_argument("--config", default="configs/base.yaml")
     a = ap.parse_args()
 
@@ -109,9 +114,10 @@ def main():
         pred = blend(probs, w).argmax(1)
         m = compute_metrics(y, pred)
         rep = per_class_report(y, pred, labels)
-        out = res / "_blend"; out.mkdir(exist_ok=True)
+        out = res / f"_{a.tag}"; out.mkdir(exist_ok=True)
         rep.to_csv(out / "per_class.csv")
-        plot_confusion(y, pred, labels, out / "confusion.png", f"{a.task} blend  macro-F1 {m['macro_f1']:.4f}")
+        plot_confusion(y, pred, labels, out / "confusion.png",
+                       f"{a.task} {a.tag}  macro-F1 {m['macro_f1']:.4f}")
         json.dump({"runs": runs, "weights": [float(x) for x in w], **m}, open(out / "blend.json", "w"), indent=1)
         rows.append({"run": "BLEND(" + ", ".join(f"{r}:{x:.2f}" for r, x in zip(runs, np.asarray(w) / np.sum(w))) + ")",
                      **m, **{f"f1_{l}": rep.loc[l, "f1-score"] for l in labels}})
