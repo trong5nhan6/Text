@@ -13,7 +13,9 @@ scored on is_val == 1, so their predictions line up row for row and can be blend
 Re-run after the test inputs are released: the split stays identical (same split_seed).
 """
 import argparse
+import hashlib
 import html
+import inspect
 import json
 import re
 import unicodedata
@@ -73,9 +75,19 @@ def read_inputs(path) -> pd.DataFrame:
     return pd.DataFrame({"id": df[id_col], "text": df[txt_col].map(clean_text)})
 
 
+def code_fingerprint() -> str:
+    """Hash of the functions that decide what lands in data/processed. Without it, editing
+    clean_text leaves a stale data/processed in place and training silently continues on the
+    old text -- val_ratio and split_seed alone cannot notice that."""
+    src = "".join(inspect.getsource(f) for f in (clean_text, dedup_key, read_inputs, prepare_task))
+    # join the lines back with nothing: the hash must not depend on CRLF vs LF, so a
+    # checkout on Windows and one on Kaggle agree
+    return hashlib.sha256("".join(src.splitlines()).encode()).hexdigest()[:12]
+
+
 def split_spec(cfg) -> dict:
     d = cfg["data"]
-    return {"val_ratio": d["val_ratio"], "split_seed": d["split_seed"]}
+    return {"val_ratio": d["val_ratio"], "split_seed": d["split_seed"], "code": code_fingerprint()}
 
 
 def prepare_task(task: str, raw_dir, processed_dir, val_ratio=0.1, split_seed=42, log=print):
@@ -104,7 +116,7 @@ def prepare_task(task: str, raw_dir, processed_dir, val_ratio=0.1, split_seed=42
     df.loc[va, "is_val"] = 1
 
     df.to_csv(processed_dir / f"{task}_train.csv", index=False)
-    json.dump({"val_ratio": val_ratio, "split_seed": split_seed},
+    json.dump({"val_ratio": val_ratio, "split_seed": split_seed, "code": code_fingerprint()},
               open(processed_dir / f"{task}_split.json", "w"), indent=1)
 
     val = read_inputs(_find(raw_dir, spec["val"]))
@@ -129,9 +141,11 @@ def ensure_processed(cfg, log=print):
     task, want = cfg["task"], split_spec(cfg)
     have_file = p / f"{task}_split.json"
     have = json.load(open(have_file)) if have_file.exists() else None
-    stale = have is not None and {k: have.get(k) for k in want} != want
+    changed = {} if have is None else {k: (have.get(k), v) for k, v in want.items() if have.get(k) != v}
+    stale = bool(changed)
     if stale:
-        log(f"split settings changed {have} -> {want}: rebuilding data/processed")
+        what = ", ".join(f"{k}: {old!r} -> {new!r}" for k, (old, new) in changed.items())
+        log(f"rebuilding data/processed ({what})")
     if not (p / f"{task}_train.csv").exists() or have is None or stale:
         prepare_task(task, cfg["paths"]["raw_dir"], p, want["val_ratio"], want["split_seed"], log)
 
