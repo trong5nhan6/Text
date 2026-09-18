@@ -1,12 +1,21 @@
-# B0 — TF-IDF (char_wb 2-5 + word 1-2) + linear classifier. CPU only, a few minutes.
+# B0 — TF-IDF (char_wb 2-5 + word 1-2) + a linear/NB classifier. CPU only, seconds per run.
 _base_: base.yaml
 model:
   type: tfidf
-  clf: lr                   # lr | svm
-  C_grid: [0.5, 1, 2, 4, 8, 16]   # best C chosen by OOF macro-F1 (svm: use smaller values, e.g. [0.05, 0.1, 0.25, 0.5, 1])
+  # lr    LogisticRegression   svm  LinearSVC        ridge  RidgeClassifier
+  # cnb   ComplementNB         sgd  SGDClassifier (log loss, elasticnet)
+  # The run is named <config>_<clf>, so each one lands in its own results/ folder.
+  clf: lr
+  # Regularisation grid; the best value is picked by held-out macro-F1. Left null, each
+  # classifier uses its own range from DEFAULT_GRIDS -- they are not on one scale: lr/svm take
+  # C (bigger = weaker regularisation) while ridge/cnb/sgd take alpha (bigger = stronger).
+  param_grid: null
   char_ngram: [2, 5]
   word_ngram: [1, 2]
   max_features: 300000
-  class_weight: auto        # auto (a: none, b: balanced) | none | balanced
+  class_weight: auto        # auto (a: none, b: balanced) | none | balanced  (cnb ignores it)
+  # Sigmoid calibration via 5-fold CV inside the fit slice. svm and ridge have no
+  # predict_proba, so uncalibrated they are blended on an arbitrary scale. Costs 5x the fit.
+  calibrate: null           # null/false = off | true = always | auto = only svm and ridge
 checkpoint:
   save: none

@@ -1,26 +1,68 @@
-"""B0 — TF-IDF (char + word n-grams) + linear classifier on the fixed train/eval split."""
+"""B0 — TF-IDF (char + word n-grams) + a linear/NB classifier on the fixed train/eval split."""
 import numpy as np
 from scipy.special import softmax
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, RidgeClassifier, SGDClassifier
+from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion, make_pipeline
 from sklearn.svm import LinearSVC
 
 from src.data.dataset import split_rows
 from src.evaluation.metrics import compute_metrics
 
+# Regularisation grid per classifier. `lr`/`svm` take C (inverse strength, bigger = weaker),
+# the rest take alpha (direct strength, bigger = stronger), so the useful ranges differ.
+DEFAULT_GRIDS = {
+    "lr":    [0.5, 1, 2, 4, 8, 16],
+    "svm":   [0.05, 0.1, 0.25, 0.5, 1],
+    "ridge": [0.1, 0.5, 1, 3, 10],
+    "cnb":   [0.01, 0.05, 0.1, 0.3, 1],
+    "sgd":   [1e-6, 1e-5, 1e-4],
+}
+# classifiers with no predict_proba: without calibration their scores go through a softmax
+# of the decision function, which is monotone (argmax unchanged) but on an arbitrary scale --
+# fine alone, misleading when blended against a model that reports real probabilities.
+NEEDS_CALIBRATION = {"svm", "ridge"}
 
-def build_tfidf(mcfg: dict, C: float, balanced: bool):
-    feats = FeatureUnion([
+
+def build_features(mcfg: dict) -> FeatureUnion:
+    return FeatureUnion([
         ("char", TfidfVectorizer(analyzer="char_wb", ngram_range=tuple(mcfg.get("char_ngram", [2, 5])),
                                  min_df=2, sublinear_tf=True, max_features=mcfg.get("max_features"))),
         ("word", TfidfVectorizer(analyzer="word", ngram_range=tuple(mcfg.get("word_ngram", [1, 2])),
                                  sublinear_tf=True, token_pattern=r"(?u)\b\w+\b|[\U0001F000-\U0001FAFF]")),
     ])
+
+
+def build_estimator(kind: str, param: float, balanced: bool, mcfg: dict, seed: int = 42):
     cw = "balanced" if balanced else None
-    clf = (LogisticRegression(C=C, max_iter=5000, class_weight=cw) if mcfg.get("clf", "lr") == "lr"
-           else LinearSVC(C=C, class_weight=cw))
-    return make_pipeline(feats, clf)
+    if kind == "lr":
+        est = LogisticRegression(C=param, max_iter=5000, class_weight=cw)
+    elif kind == "svm":
+        est = LinearSVC(C=param, class_weight=cw)
+    elif kind == "ridge":
+        est = RidgeClassifier(alpha=param, class_weight=cw)
+    elif kind == "cnb":
+        est = ComplementNB(alpha=param)          # has its own imbalance handling; ignores class_weight
+    elif kind == "sgd":
+        est = SGDClassifier(loss="log_loss", penalty="elasticnet", alpha=param,
+                            l1_ratio=mcfg.get("l1_ratio", 0.15), max_iter=3000,
+                            class_weight=cw, random_state=seed)
+    else:
+        raise ValueError(f"unknown model.clf {kind!r}; expected one of {sorted(DEFAULT_GRIDS)}")
+
+    calibrate = mcfg.get("calibrate")            # null = off | true | false | "auto"
+    if calibrate == "auto":
+        calibrate = kind in NEEDS_CALIBRATION
+    if calibrate:
+        est = CalibratedClassifierCV(est, method="sigmoid", cv=5)
+    return est
+
+
+def build_tfidf(mcfg: dict, param: float, balanced: bool, seed: int = 42):
+    return make_pipeline(build_features(mcfg),
+                         build_estimator(mcfg.get("clf", "lr"), param, balanced, mcfg, seed))
 
 
 def _proba(pipe, texts):
@@ -33,19 +75,25 @@ def _proba(pipe, texts):
 
 
 def fit_and_score(cfg, train, val, test, n_labels, log=print):
-    """Fit one model per C on the fit slice, keep the C with the best held-out macro-F1."""
+    """Fit one model per grid value on the fit slice, keep the best held-out macro-F1."""
     mcfg = cfg["model"]
+    kind = mcfg.get("clf", "lr")
     cw = mcfg.get("class_weight", "auto")
     balanced = (cfg["task"] == "b") if cw == "auto" else cw == "balanced"
+    if kind == "cnb" and balanced:
+        log("  note: ComplementNB has no class_weight; its own weighting handles the imbalance")
+    grid = mcfg.get("param_grid") or mcfg.get("C_grid") or DEFAULT_GRIDS[kind]
+    unit = "C" if kind in ("lr", "svm") else "alpha"
     fit, ev = split_rows(train)
     best = None
-    for C in mcfg.get("C_grid", [mcfg.get("C", 1.0)]):
-        pipe = build_tfidf(mcfg, C, balanced).fit(fit.text, fit.y)
+    for param in grid:
+        pipe = build_tfidf(mcfg, param, balanced, cfg.get("seed", 42)).fit(fit.text, fit.y)
         p_eval = _proba(pipe, ev.text)
         m = compute_metrics(ev.y, p_eval.argmax(1))
-        log(f"  C={C}: macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f}")
+        log(f"  {unit}={param}: macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f}")
         if best is None or m["macro_f1"] > best["macro_f1"]:
-            best = {"macro_f1": m["macro_f1"], "C": C, "balanced": balanced, "eval": p_eval,
+            best = {"macro_f1": m["macro_f1"], "C": param, "unit": unit,
+                    "balanced": balanced, "eval": p_eval,
                     "val": _proba(pipe, val.text),
                     "test": None if test is None else _proba(pipe, test.text)}
     return best

@@ -119,19 +119,32 @@ code nào, nên sửa code ở máy chỉ cần `git push` là xong.
 3. Run transformer đã có checkpoint: dùng `inference.py --checkpoints ... --input ...`.
 
 ## Kết quả hiện tại (lát held-out 10%)
-| Task | Run | Macro-F1 | Acc | n_eval |
-|---|---|---|---|---|
-| A | tfidf_lr (C=2) | 0,8278 | 0,8279 | 639 |
-| A | tfidf_svm (C=0,1) | 0,8309 | 0,8310 | 639 |
-| A | blend lr 0,1 + svm 0,9 | **0,8325** | 0,8326 | 639 |
-| B | tfidf_lr (C=2, balanced) | 0,6485 | 0,7270 | 315 |
-| B | tfidf_svm (C=0,1, balanced) | 0,6439 | 0,7270 | 315 |
-| B | blend lr 0,6 + svm 0,4 | **0,6587** | 0,7365 | 315 |
 
-`C` là tham số điều chuẩn của mô hình tuyến tính (nghịch đảo mức phạt); `train.py` tự chọn giá trị
-tốt nhất trong `model.C_grid` theo macro-F1 trên lát held-out. LR và SVM không cùng thang `C`.
+`model.clf` chọn bộ phân loại cho nhánh TF-IDF: `lr` · `svm` · `ridge` · `cnb` · `sgd`.
+Mỗi cái có dải regularization riêng (`lr`/`svm` dùng `C`, còn lại dùng `alpha`), chọn tự động
+theo macro-F1 trên lát held-out.
 
-Transformer: chưa chạy, cần train trên Kaggle.
+| Task | Run | Macro-F1 | Acc |
+|---|---|---|---|
+| A | **blend** cnb 0,25 + sgd 0,38 + ridge 0,25 + lr 0,12 | **0,8388** | 0,8388 |
+| A | tfidf_sgd (alpha=1e-4) | 0,8310 | 0,8310 |
+| A | tfidf_svm (C=0,1) | 0,8309 | 0,8310 |
+| A | tfidf_lr (C=2) | 0,8278 | 0,8279 |
+| A | tfidf_ridge (alpha=3) | 0,8215 | 0,8216 |
+| A | tfidf_cnb (alpha=0,05) | 0,8090 | 0,8091 |
+| B | **blend** svm 0,62 + cnb 0,25 + ridge 0,12 | **0,6855** | 0,7619 |
+| B | tfidf_ridge (alpha=3) | 0,6638 | 0,7365 |
+| B | tfidf_lr (C=2) | 0,6485 | 0,7270 |
+| B | tfidf_svm (C=0,1) | 0,6439 | 0,7270 |
+| B | tfidf_sgd (alpha=1e-5) | 0,6299 | 0,7111 |
+| B | tfidf_cnb (alpha=0,05) | 0,6170 | 0,7079 |
+
+**Blend hơn mọi model đơn ở cả hai task**, và cả hai đều chọn `cnb` dù nó xếp cuối bảng —
+nó chỉ đồng thuận 73–79% với nhóm tuyến tính (vốn giống nhau tới 96%), nên đóng góp nhiều nhất
+cho ensemble. Nhớ rằng cả siêu tham số lẫn trọng số blend đều được chọn trên chính lát eval,
+nên đây là **cận trên**.
+
+Transformer: chưa chạy lại sau khi đổi sang `epochs: 6`.
 
 ## Ghi chú
 - **Bias theo `id`:** không dùng `id` hay sự trùng lặp `id` giữa các file làm đặc trưng. Xem phân tích ở `docs/eda/README.md`, mục 8.

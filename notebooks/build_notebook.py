@@ -164,26 +164,35 @@ code('''# Cách 1 — test đã được push vào repo: chỉ cần chạy lạ
 # !python -m src.data.preprocessing''')
 
 # ----------------------------------------------------------------- 2) tfidf
-md("""## 2) B0 — TF-IDF (CPU, ~30 giây mỗi run)
+md("""## 2) B0 — TF-IDF (CPU, ~10 giây mỗi run)
 
 `C` là tham số điều chuẩn của mô hình tuyến tính, theo nghĩa **nghịch đảo**: `C` nhỏ = phạt trọng số
 mạnh = model đơn giản (dễ underfit); `C` lớn = ưu tiên khớp dữ liệu = dễ overfit. Ở đây đặc trưng
 TF-IDF có tới 300k chiều trên vài nghìn dòng train, nên `C` là siêu tham số quan trọng nhất của B0.
 
-`train.py` fit một model cho **mỗi giá trị trong `model.C_grid`** rồi giữ cái có macro-F1 cao nhất
-trên lát held-out. Giá trị được chọn hiện trong `results/metrics.csv`, ví dụ `tfidf-lr C=2`.
+`train.py` fit một model cho **mỗi giá trị trong lưới** rồi giữ cái có macro-F1 cao nhất trên lát
+held-out. Giá trị được chọn hiện trong `results/metrics.csv`, ví dụ `tfidf-lr C=2`.
 
-LR và SVM **không cùng thang `C`** (loss khác nhau), nên SVM dùng dải nhỏ hơn. Chạy cả hai vì blend
-của chúng thường tốt hơn từng cái một.""")
-code('''!python train.py --config configs/tfidf.yaml --task a
-!python train.py --config configs/tfidf.yaml --task b''')
+`model.clf` chọn bộ phân loại; mỗi cái có dải regularization riêng nên **không cần truyền lưới tay**:
 
-code('''# LinearSVC — run tự đặt tên tfidf_svm, dải C nhỏ hơn LR
-!python train.py --config configs/tfidf.yaml --task a --set model.clf=svm "model.C_grid=[0.05,0.1,0.25,0.5,1]"
-!python train.py --config configs/tfidf.yaml --task b --set model.clf=svm "model.C_grid=[0.05,0.1,0.25,0.5,1]"''')
+| `clf` | Model | Tham số |
+|---|---|---|
+| `lr` | LogisticRegression | `C` |
+| `svm` | LinearSVC | `C` |
+| `ridge` | RidgeClassifier | `alpha` |
+| `cnb` | ComplementNB | `alpha` |
+| `sgd` | SGDClassifier (log loss, elasticnet) | `alpha` |
 
-code('''# Dò C mịn hơn quanh giá trị vừa chọn (nhớ đổi --run_name, nếu không script từ chối chạy):
-# !python train.py --config configs/tfidf.yaml --task b --run_name tfidf_lr_fine --set "model.C_grid=[0.25,0.5,1,1.5,2,3,4]"''')
+Chạy cả năm: mỗi run ~10 giây, và **blend của chúng hơn hẳn model đơn tốt nhất** — `cnb` tuy điểm
+thấp nhưng chỉ đồng thuận 73–79% với nhóm tuyến tính nên đóng góp nhiều nhất cho ensemble.""")
+code('''for c in ['lr', 'svm', 'ridge', 'cnb', 'sgd']:
+    for t in ['a', 'b']:
+        !python train.py --config configs/tfidf.yaml --task {t} --set model.clf={c}''')
+
+code('''# Dò tham số mịn hơn quanh giá trị vừa chọn (nhớ --run_suffix, nếu không script từ chối chạy):
+# !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge "model.param_grid=[1,2,3,5,8]" --run_suffix _fine
+# Calibration sigmoid cho svm/ridge (chua co predict_proba that) — cham 5x, do tren du lieu nay KHONG giup:
+# !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge model.calibrate=true --run_suffix _cal''')
 
 # ---------------------------------------------------------- 3) transformers
 md("""## 3) B1 — Transformers

@@ -121,7 +121,7 @@ def main():
         from src.models.tfidf import fit_and_score
         best = fit_and_score(cfg, train, val, test, len(labels), log.info)
         out = {"eval": best["eval"], "val": best["val"], "test": best["test"],
-               "extra": {"model": f"tfidf-{cfg['model'].get('clf', 'lr')} C={best['C']}",
+               "extra": {"model": f"tfidf-{cfg['model'].get('clf', 'lr')} {best['unit']}={best['C']}",
                          "loss": "balanced" if best["balanced"] else "-", "best_C": best["C"]}}
     else:
         out = train_transformer(cfg, train, val, test, len(labels), run_dir, log)
