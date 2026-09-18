@@ -3,9 +3,12 @@ Text cleaning + one fixed train/eval split.
 
   python -m src.data.preprocessing                # uses configs/base.yaml paths
 
-Writes {processed_dir}/{task}_train.csv (id, text, label, y, group, is_val),
+Writes {processed_dir}/{task}_train.csv (id, text, text_kn, label, group, y, is_val),
 {task}_val.csv and, when a test file exists in raw_dir, {task}_test.csv,
 plus {task}_split.json recording how the split was made.
+
+`text_kn` is the same comment in Kannada script, looked up in data/xlit_kn.json; the column
+is simply absent when that cache is not there.
 
 `is_val` is the whole scheme: 0 = the fit slice, 1 = the held-out slice
 (data.val_ratio, stratified by label). Every model fits on is_val == 0 and is
@@ -75,11 +78,32 @@ def read_inputs(path) -> pd.DataFrame:
     return pd.DataFrame({"id": df[id_col], "text": df[txt_col].map(clean_text)})
 
 
+def add_transliteration(df, log=print):
+    """Add a `text_kn` column: the same comment in Kannada script, looked up in
+    data/xlit_kn.json (built once on Kaggle -- see notebooks/build_xlit_cache.ipynb).
+
+    Only a column, never a replacement: `text` stays byte-identical, so every finished run
+    remains comparable. Models ignore it until something is wired up to read it.
+    Skipped silently when the cache is absent, so the pipeline runs without it.
+    """
+    from src.data.transliterate import load_cache, transliterate
+    cache = load_cache()
+    if not cache:
+        log("  data/xlit_kn.json khong co -> bo qua cot text_kn")
+        return df
+    out, miss = transliterate(df.text.tolist(), cache=cache)
+    df.insert(df.columns.get_loc("text") + 1, "text_kn", out)
+    log(f"  text_kn: {len(df) - miss}/{len(df)} tra duoc trong cache"
+        + (f", {miss} cau thieu -> giu nguyen ban goc" if miss else ""))
+    return df
+
+
 def code_fingerprint() -> str:
     """Hash of the functions that decide what lands in data/processed. Without it, editing
     clean_text leaves a stale data/processed in place and training silently continues on the
     old text -- val_ratio and split_seed alone cannot notice that."""
-    src = "".join(inspect.getsource(f) for f in (clean_text, dedup_key, read_inputs, prepare_task))
+    src = "".join(inspect.getsource(f)
+                  for f in (clean_text, dedup_key, read_inputs, add_transliteration, prepare_task))
     # join the lines back with nothing: the hash must not depend on CRLF vs LF, so a
     # checkout on Windows and one on Kaggle agree
     return hashlib.sha256("".join(src.splitlines()).encode()).hexdigest()[:12]
@@ -115,17 +139,18 @@ def prepare_task(task: str, raw_dir, processed_dir, val_ratio=0.1, split_seed=42
     df["is_val"] = 0
     df.loc[va, "is_val"] = 1
 
+    df = add_transliteration(df, log)
     df.to_csv(processed_dir / f"{task}_train.csv", index=False)
     json.dump({"val_ratio": val_ratio, "split_seed": split_seed, "code": code_fingerprint()},
               open(processed_dir / f"{task}_split.json", "w"), indent=1)
 
-    val = read_inputs(_find(raw_dir, spec["val"]))
+    val = add_transliteration(read_inputs(_find(raw_dir, spec["val"])), log)
     val.to_csv(processed_dir / f"{task}_val.csv", index=False)
 
     msg = ""
     tests = sorted(raw_dir.glob(spec["test_glob"])) or sorted(raw_dir.parent.glob(spec["test_glob"]))
     if tests:
-        test = read_inputs(tests[0])
+        test = add_transliteration(read_inputs(tests[0]), log)
         test.to_csv(processed_dir / f"{task}_test.csv", index=False)
         msg = f", test={len(test)} ({tests[0].name})"
     n_eval = int(df.is_val.sum())
