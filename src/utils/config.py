@@ -59,8 +59,11 @@ def load_config(path, overrides=(), **top_level) -> dict:
 
 
 def resolve_loss(cfg: dict) -> str:
+    """`auto` picks per task: plain CE for the balanced binary task, focal for the 6-class one
+    (7.3x imbalance, macro-F1 scores every class the same). The resolved name goes into the run
+    name, so switching the default lands in a new folder instead of overwriting the old runs."""
     loss = cfg["training"].get("loss", "auto")
-    return ("ce" if cfg["task"] == "a" else "wce") if loss == "auto" else loss
+    return ("ce" if cfg["task"] == "a" else "focal") if loss == "auto" else loss
 
 
 def text_suffix(cfg: dict) -> str:

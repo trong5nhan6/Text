@@ -78,24 +78,24 @@ python train.py --config configs/tfidf.yaml --task a
 python train.py --config configs/muril.yaml --task b
 python train.py --config configs/roberta.yaml --task b --set training.loss=focal --run_name roberta_focal
 ```
-- **Tên run mặc định** là `<config>_<loss>_s<seed>`, ví dụ `muril_wce_s42`; riêng TF-IDF là `tfidf_lr`.
+- **Tên run mặc định** là `<config>_<loss>_s<seed>`, ví dụ `muril_focal_s42`; riêng TF-IDF là `tfidf_lr`.
 - **Run đã xong** thì chạy lại sẽ bỏ qua, không train lại.
 - **Đổi siêu tham số:** nếu giữ nguyên tên run, script sẽ **từ chối chạy**. Hãy dùng `--run_name` khác hoặc thêm `--overwrite`.
 - **Ghi đè cấu hình từ dòng lệnh:** mọi khoá trong YAML đều đổi được bằng `--set khoa.con=gia_tri`.
-- **Loss mặc định:** Task A dùng `ce`, Task B dùng `wce` (class weight = căn bậc hai của nghịch đảo tần suất).
+- **Loss mặc định:** Task A dùng `ce`, Task B dùng `focal` (gamma 2, class weight = căn bậc hai của nghịch đảo tần suất). Đổi bằng `--set training.loss=wce|ce`; tên run mang theo loss nên các biến thể không đè lên nhau.
 
 ## Đánh giá
 ```bash
 python evaluate.py --task b                                              # mọi run của task b
-python evaluate.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --optimize   # blend + tìm trọng số
+python evaluate.py --task b --runs tfidf_lr muril_focal_s42 roberta_focal_s42 --optimize   # blend + tìm trọng số
 ```
 
 ## Tạo file nộp
 ```bash
 # mode 1: xác suất đã lưu (val cho phase Development, test nếu run train sau khi có test)
-python inference.py --task b --runs tfidf_lr muril_wce_s42 --weights 1 2 --split val
+python inference.py --task b --runs tfidf_lr muril_focal_s42 --weights 1 2 --split val
 # mode 2: từ checkpoint, cho run train trước khi có test (không cần train lại)
-python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 --input data/raw/multiclass_test_inputs.csv
+python inference.py --task b --checkpoints checkpoints/b/muril_focal_s42 --input data/raw/multiclass_test_inputs.csv
 ```
 
 ## Kaggle

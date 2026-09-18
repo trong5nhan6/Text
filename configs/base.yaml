@@ -57,7 +57,7 @@ training:
   max_grad_norm: 1.0
   precision: auto           # auto | fp32 | fp16 | bf16
   num_workers: 2
-  loss: auto                # auto (a: ce, b: wce) | ce | wce | focal
+  loss: auto                # auto (a: ce, b: focal) | ce | wce | focal
   class_weight: sqrt_inv    # none | inverse | sqrt_inv  (used by wce / focal)
   focal_gamma: 2.0
   label_smoothing: 0.0

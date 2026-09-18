@@ -35,8 +35,8 @@ KNOBS = [
     ("training.lr", "learning rate cua backbone (head dung head_lr)"),
     ("training.batch_size", None),
     ("training.grad_accum", "tang len khi giam batch_size, de giu batch hieu dung"),
-    ("training.loss", "auto | ce | wce | focal   (auto: task a -> ce, task b -> wce)"),
-    ("training.label_smoothing", "bi bo qua khi loss=focal"),
+    ("training.loss", "auto | ce | wce | focal   (auto: task a -> ce, task b -> focal)"),
+    ("training.label_smoothing", "ap dung cho ca ce, wce va focal"),
     ("--- du lieu ---", None),
     ("data.text_type", "null/latin = chu Latin | kn = chu Kannada | both = ca hai"),
     ("data.tta", "CHI transformer: infer ca 2 chu viet roi trung binh (tfidf se bi tu choi)"),
@@ -75,7 +75,7 @@ def _overrides_cell() -> str:
         lines.append(f"{entry.ljust(width + 20)}# {note}" if note else entry)
     lines.append("}")
     return "\n".join(lines) + """
-RUN_SUFFIX = ''        # vi du '_e8' -> run ten muril_wce_s42_e8. BAT BUOC khi doi gia tri that su.
+RUN_SUFFIX = ''        # vi du '_e8' -> run ten muril_focal_s42_e8. BAT BUOC khi doi gia tri that su.
 
 # doi data.val_ratio / data.split_seed se chia lai split, moi ket qua cu se het so sanh duoc
 
@@ -287,16 +287,22 @@ for i, c in enumerate(CONFIGS):
 print("")
 print(f"xong {len(CONFIGS) * len(TASKS)} run trong {(time.time() - t0) / 60:.1f} phut")''')
 
-md("""**Task B — thử `ce` thay cho `wce`.** Mặc định Task B dùng weighted CE để bù lệch lớp 7,3 lần.
-Nhưng ở lần chạy trước `roberta_wce_s42` chỉ đạt accuracy 0,6444 — thấp bất thường, dấu hiệu class
-weight đẩy quá tay sang lớp hiếm và bào mòn lớp lớn. `ce` là đối chứng cần có.
+md("""**Task B — hai đối chứng cho loss.** Mặc định giờ là **focal** (gamma 2, class weight
+`sqrt_inv`): nó hạ trọng số những mẫu đã dễ và dồn gradient vào mẫu khó, hợp với lệch lớp 7,3 lần
+và với macro-F1 vốn chấm mọi lớp ngang nhau.
 
-Không cần `--run_suffix`: tên run đã chứa loss, nên chúng nằm ở `results/b/<config>_ce_s42`,
-tách hẳn với `<config>_wce_s42`.""")
-code('''for c in CONFIGS:
-    print("")
-    print("=" * 72); print(f"task b | {c} | loss=ce"); print("=" * 72, flush=True)
-    !python train.py --config configs/{c}.yaml --task b --set training.loss=ce''')
+Hai cái đáng chạy để so:
+- **`wce`** — weighted CE, mặc định cũ. Ở lần chạy 30-epoch, `roberta_wce_s42` chỉ đạt accuracy
+  0,6444, dấu hiệu class weight đẩy quá tay sang lớp hiếm và bào mòn lớp lớn.
+- **`ce`** — không bù lệch gì cả, cận dưới.
+
+Không cần `--run_suffix`: tên run đã chứa loss, nên ba biến thể nằm ở
+`results/b/<config>_focal_s42`, `_wce_s42`, `_ce_s42` — tách hẳn nhau.""")
+code('''for loss in ['wce', 'ce']:
+    for c in CONFIGS:
+        print("")
+        print("=" * 72); print(f"task b | {c} | loss={loss}"); print("=" * 72, flush=True)
+        !python train.py --config configs/{c}.yaml --task b --set training.loss={loss}''')
 
 code('''# Ví dụ biến thể:
 # !python train.py --config configs/muril.yaml --task b --set training.loss=focal
@@ -340,8 +346,8 @@ results/
 │   ├── tfidf_svm/
 │   ├── muril_ce_s42/               ← configs/muril.yaml  --task a
 │   └── roberta_ce_s42/             ← configs/roberta.yaml --task a
-├── b/                              Task B  (loss mặc định là wce nên tên là _wce_)
-│   ├── tfidf_lr/  tfidf_svm/  muril_wce_s42/  roberta_wce_s42/
+├── b/                              Task B  (loss mặc định là focal nên tên là _focal_)
+│   ├── tfidf_lr/  tfidf_svm/  muril_focal_s42/  roberta_focal_s42/
 │   └── _blend/                     kết quả blend gần nhất
 └── metrics.csv                     1 dòng cho mỗi run, cả 2 task
 checkpoints/{task}/{run}/           trọng số fp16 của run đó
@@ -386,7 +392,7 @@ for t in ('a', 'b'):
     !python inference.py --task {t} --runs {runs} --weights {ws} --split val --tag ens
 
 # test, tu checkpoint (run train truoc khi co test):
-# !python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 --input data/raw/multiclass_test_inputs.csv --tag ens1''')
+# !python inference.py --task b --checkpoints checkpoints/b/muril_focal_s42 --input data/raw/multiclass_test_inputs.csv --tag ens1''')
 
 code('''import glob, os, shutil
 out = '/kaggle/working/submissions'
