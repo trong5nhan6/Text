@@ -36,6 +36,42 @@ def _stub_urduhack():
             sys.modules["urduhack"] = stub
 
 
+def _allow_fairseq_checkpoint():
+    """PyTorch 2.6 flipped torch.load's `weights_only` default from False to True. fairseq
+    (2022) calls torch.load without the flag in load_checkpoint_to_cpu, and the IndicXlit
+    checkpoint holds an argparse.Namespace, which the safe unpickler refuses:
+
+        UnpicklingError: Unsupported global: GLOBAL argparse.Namespace
+
+    Allowlisting the classes it needs is the targeted fix; falling back to weights_only=False
+    covers whatever else the checkpoint carries. Unpickling arbitrary objects is only safe
+    because this file is downloaded by AI4Bharat's own library from their release over https.
+    """
+    import argparse
+    import torch
+    try:
+        allow = [argparse.Namespace]
+        try:
+            import omegaconf
+            from omegaconf.base import ContainerMetadata, Metadata
+            allow += [omegaconf.DictConfig, omegaconf.ListConfig, ContainerMetadata, Metadata]
+        except Exception:
+            pass
+        torch.serialization.add_safe_globals(allow)
+    except AttributeError:
+        return                                   # torch < 2.6: nothing to do
+
+    if not getattr(torch.load, "_hastika_patched", False):
+        _orig = torch.load
+
+        def _load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return _orig(*args, **kwargs)
+
+        _load._hastika_patched = True
+        torch.load = _load
+
+
 def load_cache(path=CACHE) -> dict:
     path = Path(path)
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -74,6 +110,7 @@ def build_cache(texts, lang="kn", beam=4, save_every=500, path=CACHE, log=print)
     """Fill the cache for whatever is missing. Saves as it goes, so a killed Kaggle session
     loses at most `save_every` sentences and the next run picks up where it stopped."""
     _stub_urduhack()
+    _allow_fairseq_checkpoint()
     from ai4bharat.transliteration import XlitEngine
     path = Path(path)
     cache = load_cache(path)

@@ -459,12 +459,17 @@ code('''!pip -q install ftfy
 !pip -q install --no-deps ai4bharat-transliteration
 !pip -q install pydload indic-nlp-library ujson sacremoses
 
-from src.data.transliterate import _stub_urduhack
-_stub_urduhack()                                   # chan truoc khi import, tranh TensorFlow
+from src.data.transliterate import _stub_urduhack, _allow_fairseq_checkpoint
+_stub_urduhack()              # chan truoc khi import, tranh keo theo TensorFlow
+_allow_fairseq_checkpoint()   # torch 2.6+ mac dinh weights_only=True, fairseq chua biet dieu do
 
 from ai4bharat.transliteration import XlitEngine
 e = XlitEngine("kn", beam_width=4, src_script_type="roman")
 print(e.translit_sentence("nin sule maga"))        # mong doi: {'kn': 'ನಿನ್ ಸುಲೇ ಮಗ'}''')
+
+md("""> Hai dòng `_stub_urduhack()` / `_allow_fairseq_checkpoint()` ở trên chỉ vá cho **kernel của
+> notebook**. Cell sinh cache chạy `!python -m ...` ở **tiến trình riêng**, nên hai hàm đó cũng
+> được gọi sẵn bên trong `build_cache()` — không cần làm gì thêm.""")
 
 md("""## 2) Sinh cache
 
