@@ -504,3 +504,126 @@ shutil.copy(CACHE, "/kaggle/working/xlit_kn.json")
 print(f"tai ve: /kaggle/working/xlit_kn.json  ({CACHE.stat().st_size/1e6:.1f} MB)")''')
 
 write("build_xlit_cache.ipynb")
+
+
+# =====================================================================================
+#  Notebook 3 -- build the English-translation cache (the TRAA arm). Also a one-off, and
+#  it needs notebook 2's output, because MT models want native script, not romanised text.
+# =====================================================================================
+md(f"""# Sinh cache dịch máy — Kanglish → English
+
+**Chạy MỘT LẦN**, và **chạy SAU** `build_xlit_cache.ipynb`. Kết quả là `data/mt_en.json`,
+commit vào repo; sau đó mọi máy chỉ đọc JSON.
+
+**Settings:** Accelerator = **GPU T4** · Internet = **On**
+
+### Luồng xử lý
+
+```
+Kanglish (chữ Latin)  ──IndicXlit──►  chữ Kannada  ──NLLB-200──►  English
+  "nin sule maga"                     "ನಿನ್ ಸುಲೇ ಮಗ"              "you are a bastard"
+```
+
+Model dịch **cần chữ bản địa**, không nhận chữ Latin — nên phải chuyển tự trước. Bài
+*"Transliterate or translate?"* (Puranik et al., FIRE 2021) cũng làm đúng thế: họ dịch
+**từ tập đã chuyển tự**.
+
+### Cảnh báo trước khi chạy
+
+Bài trên đo trên **chính tiếng Kannada** và thấy dịch **không giúp**:
+
+| Kannada, weighted F1 | BERT | ULMFiT |
+|---|---|---|
+| Gốc (TRA) | 0,6040 | **0,6389** |
+| Chuyển tự (TRAI) | 0,5831 | 0,6150 |
+| **Dịch (TRAA)** | 0,6231 | 0,6031 |
+
+Hai lý do cơ chế: dịch máy **làm dịu hoặc bỏ từ chửi** (`sule`, `nayi`, `thu` — đúng những
+token mang tín hiệu Hate mạnh nhất theo EDA mục 6), và đầu vào code-mixed sai chính tả nằm
+ngoài phân bố huấn luyện của model dịch.
+
+Vẫn đáng chạy để **tự kiểm chứng trên dữ liệu của mình** và để có đủ ba nhánh TRA/TRAI/TRAA
+cho paper.""")
+
+code(f'''import os, subprocess, sys
+REPO, BRANCH, WORK = "{REPO}", "{BRANCH}", "/kaggle/working"
+
+TOKEN = ""
+try:
+    from kaggle_secrets import UserSecretsClient
+    TOKEN = UserSecretsClient().get_secret("GH_TOKEN")
+except Exception:
+    pass
+url = f"https://{{TOKEN + '@' if TOKEN else ''}}github.com/{{REPO}}.git"
+hide = (lambda s: s.replace(TOKEN, "***")) if TOKEN else (lambda s: s)
+
+os.chdir(WORK)
+cmd = (["git", "-C", "repo", "pull", "--ff-only"] if os.path.isdir("repo/.git")
+       else ["git", "clone", "--depth", "1", "-b", BRANCH, url, "repo"])
+r = subprocess.run(cmd, capture_output=True, text=True)
+print(hide((r.stdout + r.stderr).strip()))
+os.chdir(f"{{WORK}}/repo"); sys.path.insert(0, os.getcwd())
+print("cwd:", os.getcwd())''')
+
+md("""## 1) Kiểm tra điều kiện
+
+Cần `data/xlit_kn.json` đã có trong repo. Nếu chưa, chạy `build_xlit_cache.ipynb` trước rồi
+commit kết quả.""")
+code('''!pip -q install ftfy
+import torch
+from src.data.transliterate import CACHE as XLIT, load_cache
+
+xlit = load_cache()
+print(f"cache chuyen tu: {len(xlit)} cau" if xlit else "!! THIEU data/xlit_kn.json")
+print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "khong co")''')
+
+md("""## 2) Dịch
+
+`facebook/nllb-200-distilled-600M` — transformers thuần, không cần fairseq, và Kannada
+(`kan_Knda`) là một trong 200 ngôn ngữ nó hỗ trợ. Lưu sau **mỗi batch** nên bị ngắt thì chạy
+lại sẽ tiếp tục.""")
+code('''!python -m src.data.translate --source kn --model nllb --batch_size 24 --num_beams 4''')
+
+code('''# Bien the: dich THANG tu chu Latin, khong qua buoc chuyen tu (yeu hon, nhung de doi chung)
+# !python -m src.data.translate --source roman --out data/mt_en_roman.json
+# Model to hon, cham hon, chat luong hon:
+# !python -m src.data.translate --source kn --model nllb-1.3b --batch_size 12''')
+
+md("""## 3) Kiểm tra bằng mắt — **quan trọng nhất**
+
+Điều cần soi: **từ chửi có sống sót qua bản dịch không?** Nếu `sule`, `nayi`, `thu`, `maga`
+bị dịch thành từ trung tính hoặc biến mất, thì TRAA đã phá đúng tín hiệu mà Task A cần, và
+bạn biết ngay là nó sẽ không giúp.""")
+code('''import json, re
+import pandas as pd
+from src.data.transliterate import load_cache as load_xlit
+from src.data.translate import CACHE as MT
+
+mt, xlit = json.load(open(MT, encoding='utf-8')), load_xlit()
+print(f"{len(mt)} cau da dich\\n")
+
+# nhung cau chua token Hate manh nhat (EDA muc 6) -- xem ban dich con giu duoc khong
+SLURS = ["sule", "nayi", "thu", "maga", "magane", "dagar", "muduka"]
+rows = []
+for k in mt:
+    if any(re.search(rf"\\b{s}\\b", k.lower()) for s in SLURS):
+        rows.append({"goc": k[:45], "kannada": xlit.get(k, "?")[:30], "english": mt[k][:55]})
+    if len(rows) >= 12:
+        break
+pd.set_option("display.max_colwidth", 60)
+display(pd.DataFrame(rows))''')
+
+md("""## 4) Tải về rồi commit
+
+```bash
+git add data/mt_en.json
+git commit -m "Add Kannada->English translation cache"
+git push
+```""")
+code('''import shutil
+from src.data.translate import CACHE
+
+shutil.copy(CACHE, "/kaggle/working/mt_en.json")
+print(f"tai ve: /kaggle/working/mt_en.json  ({CACHE.stat().st_size/1e6:.1f} MB)")''')
+
+write("build_mt_cache.ipynb")
