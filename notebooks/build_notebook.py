@@ -287,26 +287,15 @@ for i, c in enumerate(CONFIGS):
 print("")
 print(f"xong {len(CONFIGS) * len(TASKS)} run trong {(time.time() - t0) / 60:.1f} phut")''')
 
-md("""**Task B — hai đối chứng cho loss.** Mặc định giờ là **focal** (gamma 2, class weight
-`sqrt_inv`): nó hạ trọng số những mẫu đã dễ và dồn gradient vào mẫu khó, hợp với lệch lớp 7,3 lần
-và với macro-F1 vốn chấm mọi lớp ngang nhau.
-
-Hai cái đáng chạy để so:
-- **`wce`** — weighted CE, mặc định cũ. Ở lần chạy 30-epoch, `roberta_wce_s42` chỉ đạt accuracy
-  0,6444, dấu hiệu class weight đẩy quá tay sang lớp hiếm và bào mòn lớp lớn.
-- **`ce`** — không bù lệch gì cả, cận dưới.
-
-Không cần `--run_suffix`: tên run đã chứa loss, nên ba biến thể nằm ở
-`results/b/<config>_focal_s42`, `_wce_s42`, `_ce_s42` — tách hẳn nhau.""")
-code('''for loss in ['wce', 'ce']:
-    for c in CONFIGS:
-        print("")
-        print("=" * 72); print(f"task b | {c} | loss={loss}"); print("=" * 72, flush=True)
-        !python train.py --config configs/{c}.yaml --task b --set training.loss={loss}''')
+md("""> **Loss:** vòng lặp trên đã dùng đúng loss cho từng task qua `training.loss: auto` —
+> Task A `ce` (nhãn 51/49, không cần bù), Task B **`focal`** (gamma 2 + class weight `sqrt_inv`).
+> Task B lệch **7,3 lần**: Gender 1.362 (43,1%) so với Geo-political 186 (5,9%), mà macro-F1 chấm
+> cả 6 lớp ngang nhau. Focal hạ trọng số những mẫu đã dễ và dồn gradient vào mẫu khó.""")
 
 code('''# Ví dụ biến thể:
-# !python train.py --config configs/muril.yaml --task b --set training.loss=focal
+# !python train.py --config configs/muril.yaml --task b --set training.focal_gamma=3 --run_suffix _g3
 # !python train.py --config configs/muril.yaml --task b --set data.max_len=128 --run_name muril_len128
+# !python train.py --config configs/muril.yaml --task b --set data.text_type=both --set data.tta=true
 # !python train.py --config configs/roberta.yaml --task b --run_name xlmr_large --set model.name=xlm-roberta-large training.lr=1e-5 training.batch_size=16 training.grad_accum=2''')
 
 code('''!du -sh checkpoints/*/* 2>/dev/null; df -h /kaggle/working | tail -1
