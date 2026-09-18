@@ -442,11 +442,25 @@ print("cwd:", os.getcwd())''')
 
 md("""## 1) Cài IndicXlit
 
-`fairseq-fixed` là bản vá của `fairseq` cho Python 3.11–3.12 (Kaggle đang dùng 3.12); bản
-`fairseq` gốc không cài được ở đó. Bước này mất vài phút.""")
+Phải cài theo đúng thứ tự này, **không** cài thẳng `ai4bharat-transliteration`:
+
+1. **`fairseq-fixed`** — bản vá của `fairseq` cho Python 3.11–3.12 (Kaggle đang dùng 3.12).
+   `fairseq` gốc không build được ở đó.
+2. **`--no-deps`** — `ai4bharat-transliteration` khai báo phụ thuộc `fairseq` **theo đúng tên
+   đó**, nên pip sẽ cố cài bản gốc và chết, kể cả khi `fairseq-fixed` đã có. `--no-deps` cắt
+   đường đó, đồng thời bỏ luôn `flask`, `gevent`, `tensorboardX` — thừa hoàn toàn với ta.
+3. Cài tay đúng 4 gói nó thật sự cần lúc chạy.
+
+`urduhack` cố tình **không** cài: nó chỉ dùng để chuẩn hoá chữ Shahmukhi (Urdu) nhưng lại kéo
+theo **TensorFlow**, và còn hạ cấp `click` làm hỏng gói khác. `src/data/transliterate.py` đăng
+ký sẵn một module giả mang tên đó trước khi import, nên nhánh Urdu không bao giờ chạy tới.""")
 code('''!pip -q install ftfy
 !pip -q install fairseq-fixed
-!pip -q install ai4bharat-transliteration
+!pip -q install --no-deps ai4bharat-transliteration
+!pip -q install pydload indic-nlp-library ujson sacremoses
+
+from src.data.transliterate import _stub_urduhack
+_stub_urduhack()                                   # chan truoc khi import, tranh TensorFlow
 
 from ai4bharat.transliteration import XlitEngine
 e = XlitEngine("kn", beam_width=4, src_script_type="roman")

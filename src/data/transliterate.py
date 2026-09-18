@@ -20,6 +20,22 @@ ROOT = Path(__file__).resolve().parents[2]
 CACHE = ROOT / "data" / "xlit_kn.json"
 
 
+def _stub_urduhack():
+    """ai4bharat.transliteration imports urduhack at module level to normalise Shahmukhi, and
+    urduhack drags in TensorFlow. We only ever ask for Kannada, so register a no-op module
+    under that name first. Must happen in every process that imports XlitEngine, which is why
+    it lives here rather than in the notebook."""
+    import sys
+    import types
+    if "urduhack" not in sys.modules:
+        try:
+            import urduhack                       # noqa: F401  -- the real one is fine if present
+        except ImportError:
+            stub = types.ModuleType("urduhack")
+            stub.normalize = lambda s: s
+            sys.modules["urduhack"] = stub
+
+
 def load_cache(path=CACHE) -> dict:
     path = Path(path)
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -57,6 +73,7 @@ def raw_texts(raw_dir=None) -> list:
 def build_cache(texts, lang="kn", beam=4, save_every=500, path=CACHE, log=print):
     """Fill the cache for whatever is missing. Saves as it goes, so a killed Kaggle session
     loses at most `save_every` sentences and the next run picks up where it stopped."""
+    _stub_urduhack()
     from ai4bharat.transliteration import XlitEngine
     path = Path(path)
     cache = load_cache(path)
