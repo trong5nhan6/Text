@@ -391,10 +391,116 @@ for z in glob.glob('results/submissions/*/submission.zip'):
     shutil.copy(z, f"{out}/{os.path.basename(os.path.dirname(z))}.zip")
 !ls -la /kaggle/working/submissions''')
 
-nb = {"cells": cells,
-      "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-                   "language_info": {"name": "python"}, "accelerator": "GPU"},
-      "nbformat": 4, "nbformat_minor": 5}
-out = ROOT / "notebooks" / "hastika_kaggle.ipynb"
-json.dump(nb, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-print(f"wrote {out} ({len(cells)} cells, repo {REPO}@{BRANCH})")
+def write(filename: str):
+    nb = {"cells": list(cells),
+          "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+                       "language_info": {"name": "python"}, "accelerator": "GPU"},
+          "nbformat": 4, "nbformat_minor": 5}
+    out = ROOT / "notebooks" / filename
+    json.dump(nb, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print(f"wrote {out} ({len(cells)} cells)")
+    cells.clear()
+
+
+write("hastika_kaggle.ipynb")
+
+
+# =====================================================================================
+#  Notebook 2 -- build the transliteration cache. A one-off job, kept out of the training
+#  notebook so that one stays quick to re-run.
+# =====================================================================================
+md(f"""# Sinh cache chuyển tự — Kanglish (chữ Latin) → chữ Kannada
+
+**Chạy MỘT LẦN.** Kết quả là `data/xlit_kn.json`, commit vào repo; sau đó mọi máy chỉ đọc file
+JSON — không cần cài IndicXlit, không cần GPU, không cần mạng.
+
+**Settings (panel bên phải):** Accelerator = **GPU T4** · Internet = **On**
+
+> **Vì sao phải chạy ở Kaggle:** IndicXlit phụ thuộc `fairseq`, mà `fairseq` **không build được
+> trên Windows** — header của torch cần `/std:c++17` còn setup của fairseq không truyền cờ đó,
+> nên dừng ở `error C2429: nested-namespace-definition`. Trên Linux thì cài bình thường.""")
+
+code(f'''import os, subprocess, sys
+REPO, BRANCH, WORK = "{REPO}", "{BRANCH}", "/kaggle/working"
+
+TOKEN = ""
+try:
+    from kaggle_secrets import UserSecretsClient
+    TOKEN = UserSecretsClient().get_secret("GH_TOKEN")
+except Exception:
+    pass
+url = f"https://{{TOKEN + '@' if TOKEN else ''}}github.com/{{REPO}}.git"
+hide = (lambda s: s.replace(TOKEN, "***")) if TOKEN else (lambda s: s)
+
+os.chdir(WORK)
+cmd = (["git", "-C", "repo", "pull", "--ff-only"] if os.path.isdir("repo/.git")
+       else ["git", "clone", "--depth", "1", "-b", BRANCH, url, "repo"])
+r = subprocess.run(cmd, capture_output=True, text=True)
+print(hide((r.stdout + r.stderr).strip()))
+os.chdir(f"{{WORK}}/repo"); sys.path.insert(0, os.getcwd())
+print("cwd:", os.getcwd())''')
+
+md("""## 1) Cài IndicXlit
+
+`fairseq-fixed` là bản vá của `fairseq` cho Python 3.11–3.12 (Kaggle đang dùng 3.12); bản
+`fairseq` gốc không cài được ở đó. Bước này mất vài phút.""")
+code('''!pip -q install ftfy
+!pip -q install fairseq-fixed
+!pip -q install ai4bharat-transliteration
+
+from ai4bharat.transliteration import XlitEngine
+e = XlitEngine("kn", beam_width=4, src_script_type="roman")
+print(e.translit_sentence("nin sule maga"))        # mong doi: {'kn': 'ನಿನ್ ಸುಲೇ ಮಗ'}''')
+
+md("""## 2) Sinh cache
+
+Gom mọi comment trong `data/raw` (4 file, **7.565 câu duy nhất** sau khi làm sạch), chuyển tự
+từng câu rồi ghi ra `data/xlit_kn.json`.
+
+Khoá của cache là **text đã làm sạch** — đúng chuỗi mà `preprocessing.py` đặt vào cột `text`,
+nên lúc tra là khớp tuyệt đối.
+
+Script **lưu sau mỗi 500 câu**: session bị ngắt thì chạy lại sẽ tiếp tục từ chỗ dừng.""")
+code('''!python -m src.data.transliterate --lang kn --beam 4''')
+
+md("""## 3) Kiểm tra bằng mắt
+
+Điều cần thấy: các **biến thể chính tả khác nhau của cùng một từ** phải cho ra **cùng một chuỗi
+Kannada**. Đó chính là cơ chế làm giảm 25,6% OOV — nếu không thấy điều này thì chuyển tự sẽ
+không giúp được gì.""")
+code('''import json
+from src.data.transliterate import CACHE
+
+cache = json.load(open(CACHE, encoding='utf-8'))
+print(f"{len(cache)} cau trong cache\\n")
+
+# cac bien the cua cung mot tu co ve cung mot chuoi Kannada khong?
+probe = ["channel", "chanela", "channele", "chaannel", "aadre", "adre", "adru", "sule", "sulee"]
+for w in probe:
+    outs = {v.split()[i] for k, v in cache.items()
+            for i, t in enumerate(k.lower().split()) if t == w and i < len(v.split())}
+    print(f"  {w:10s} -> {sorted(outs)[:3] if outs else '(khong gap)'}")
+
+print("\\n--- vai cau day du ---")
+for k, v in list(cache.items())[:5]:
+    print(f"  {k[:55]:57s} -> {v[:55]}")''')
+
+md("""## 4) Tải về rồi commit
+
+Tải `xlit_kn.json` từ panel **Output** bên phải, đặt vào `data/` ở máy, rồi:
+
+```bash
+git add data/xlit_kn.json
+git commit -m "Add Roman->Kannada transliteration cache"
+git push
+```
+
+Sau đó bật bằng `--set data.transliterate=true`. **Khi file test phát hành (20/9)**, chạy lại
+notebook này một lần nữa — nó chỉ chuyển tự phần câu mới.""")
+code('''import shutil
+from src.data.transliterate import CACHE
+
+shutil.copy(CACHE, "/kaggle/working/xlit_kn.json")
+print(f"tai ve: /kaggle/working/xlit_kn.json  ({CACHE.stat().st_size/1e6:.1f} MB)")''')
+
+write("build_xlit_cache.ipynb")
