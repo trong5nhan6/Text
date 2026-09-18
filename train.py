@@ -21,9 +21,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import yaml
 
-from src.data.dataset import label_names, load_split, split_rows
+from src.data.dataset import (label_names, load_split, require_columns, split_rows,
+                              text_columns)
 from src.data.preprocessing import ensure_processed
 from src.evaluation.metrics import compute_metrics, rebuild_metrics_table
 from src.evaluation.submission import write_submission
@@ -72,10 +74,26 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_name = resolve_loss(cfg)
-    fit, ev = split_rows(train)
+    cols = text_columns(cfg)
+    fit, ev = split_rows(require_columns(train, cols, "train"))
+    require_columns(val, cols, "val")
+
+    # An encoder shares its parameters across both scripts, so here "both" means extra rows,
+    # not extra features. Only the fit slice is duplicated: a Kannada copy of an eval row is
+    # the same comment, and putting it in training would leak. Scoring stays on `text` so the
+    # numbers line up with every other run.
+    view = cols[-1] if cols != ["text", "text_kn"] else "text"
+    if cols == ["text", "text_kn"]:
+        fit = pd.concat([fit, fit.assign(text=fit.text_kn)], ignore_index=True)
+    elif view != "text":
+        fit, ev = fit.assign(text=fit[view]), ev.assign(text=ev[view])
+        val = val.assign(text=val[view])
+        if test is not None:
+            test = test.assign(text=test[view])
     counts = np.bincount(fit.y, minlength=n_labels)
     log.info(f"device={device} model={cfg['model']['name']} loss={loss_name} "
-             f"precision={cfg['training']['precision']} | {len(fit)} fit / {len(ev)} eval")
+             f"precision={cfg['training']['precision']} | text_type={cfg['data']['text_type'] or 'latin'}"
+             f" | {len(fit)} fit / {len(ev)} eval")
 
     set_seed(cfg["seed"])
     t0 = time.time()

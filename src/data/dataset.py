@@ -27,6 +27,25 @@ def split_rows(train):
     return train[train.is_val == 0], train[train.is_val == 1]
 
 
+TEXT_COLUMNS = {"latin": ["text"], "kn": ["text_kn"], "both": ["text", "text_kn"]}
+
+
+def text_columns(cfg):
+    """-> the column names data.text_type asks for. null means latin."""
+    tt = cfg.get("data", {}).get("text_type") or "latin"
+    if tt not in TEXT_COLUMNS:
+        raise ValueError(f"data.text_type={tt!r}; expected one of {sorted(TEXT_COLUMNS)}")
+    return TEXT_COLUMNS[tt]
+
+
+def require_columns(df, cols, what="data"):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise SystemExit(f"{what} thieu cot {missing}. Chay build_xlit_cache.ipynb de sinh "
+                         f"data/xlit_kn.json roi `python -m src.data.preprocessing`.")
+    return df
+
+
 def eval_y(train):
     """Gold labels of the held-out slice, aligned with each run's eval.npy."""
     return train.y.to_numpy()[train.is_val.to_numpy() == 1]

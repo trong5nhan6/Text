@@ -12,6 +12,14 @@ paths:
   log_dir: logs
 
 data:
+  # Which view of the comment the model sees. `text` is the cleaned Kanglish (Latin script),
+  # `text_kn` the same comment in Kannada script (data/xlit_kn.json).
+  #   null / latin  only text                        (default)
+  #   kn            only text_kn
+  #   both          both -- tfidf: one set of features per column, on the same row;
+  #                         transformer: the Kannada copy added as extra training rows
+  # The run name gains _kn / _both, so the three land in separate results/ folders.
+  text_type: null
   val_ratio: 0.1            # one 90/10 split: fit on 90%, score on the held-out 10%
   split_seed: 42            # keep fixed -> every run shares the split, so runs can be blended
   max_len: 96               # 95% of comments < 35 words

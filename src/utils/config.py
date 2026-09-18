@@ -63,6 +63,12 @@ def resolve_loss(cfg: dict) -> str:
     return ("ce" if cfg["task"] == "a" else "wce") if loss == "auto" else loss
 
 
+def text_suffix(cfg: dict) -> str:
+    """Runs on a different view of the text must not share a results/ folder."""
+    tt = cfg.get("data", {}).get("text_type")
+    return "" if tt in (None, "latin") else f"_{tt}"
+
+
 def run_name(cfg: dict) -> str:
     """<config>_<loss>_s<seed> (tfidf: <config>_<clf>), plus an optional --run_suffix.
     The suffix exists so a batch of runs with changed hyper-parameters can keep the
@@ -71,7 +77,7 @@ def run_name(cfg: dict) -> str:
         return cfg["run_name"]
     base = (f"{cfg['config_name']}_{cfg['model'].get('clf', 'lr')}" if cfg["model"]["type"] == "tfidf"
             else f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}")
-    return base + (cfg.get("run_suffix") or "")
+    return base + text_suffix(cfg) + (cfg.get("run_suffix") or "")
 
 
 def dump(cfg: dict, path):

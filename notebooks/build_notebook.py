@@ -38,6 +38,7 @@ KNOBS = [
     ("training.loss", "auto | ce | wce | focal   (auto: task a -> ce, task b -> wce)"),
     ("training.label_smoothing", "bi bo qua khi loss=focal"),
     ("--- du lieu ---", None),
+    ("data.text_type", "null/latin = chu Latin | kn = chu Kannada | both = ca hai"),
     ("data.max_len", "Religion / Geo-political dai hon, hay bi cat o 96"),
     ("--- model ---", None),
     ("model.pooling", "cls | mean"),

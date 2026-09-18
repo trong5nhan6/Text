@@ -2,13 +2,14 @@
 import numpy as np
 from scipy.special import softmax
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, RidgeClassifier, SGDClassifier
 from sklearn.naive_bayes import ComplementNB
-from sklearn.pipeline import FeatureUnion, make_pipeline
+from sklearn.pipeline import make_pipeline
 from sklearn.svm import LinearSVC
 
-from src.data.dataset import split_rows
+from src.data.dataset import require_columns, split_rows, text_columns
 from src.evaluation.metrics import compute_metrics
 
 # Regularisation grid per classifier. `lr`/`svm` take C (inverse strength, bigger = weaker),
@@ -26,13 +27,27 @@ DEFAULT_GRIDS = {
 NEEDS_CALIBRATION = {"svm", "ridge"}
 
 
-def build_features(mcfg: dict) -> FeatureUnion:
-    return FeatureUnion([
-        ("char", TfidfVectorizer(analyzer="char_wb", ngram_range=tuple(mcfg.get("char_ngram", [2, 5])),
-                                 min_df=2, sublinear_tf=True, max_features=mcfg.get("max_features"))),
-        ("word", TfidfVectorizer(analyzer="word", ngram_range=tuple(mcfg.get("word_ngram", [1, 2])),
-                                 sublinear_tf=True, token_pattern=r"(?u)\b\w+\b|[\U0001F000-\U0001FAFF]")),
-    ])
+WORD_PATTERN = r"(?u)\b\w+\b|[\U0001F000-\U0001FAFF]"     # keep 1-char words and emoji
+
+
+def build_features(mcfg: dict, columns=("text",)) -> ColumnTransformer:
+    """char + word n-grams for each text column. With two columns the blocks are concatenated
+    on the same row, so the model sees both scripts at once. Extra rows would not work here:
+    Kannada n-grams share no characters with Latin ones, so features learned from one view
+    never fire on the other."""
+    blocks = []
+    for col in columns:
+        blocks += [
+            (f"char_{col}", TfidfVectorizer(analyzer="char_wb",
+                                            ngram_range=tuple(mcfg.get("char_ngram", [2, 5])),
+                                            min_df=2, sublinear_tf=True,
+                                            max_features=mcfg.get("max_features")), col),
+            (f"word_{col}", TfidfVectorizer(analyzer="word",
+                                            ngram_range=tuple(mcfg.get("word_ngram", [1, 2])),
+                                            sublinear_tf=True,
+                                            token_pattern=WORD_PATTERN), col),
+        ]
+    return ColumnTransformer(blocks)
 
 
 def build_estimator(kind: str, param: float, balanced: bool, mcfg: dict, seed: int = 42):
@@ -60,8 +75,8 @@ def build_estimator(kind: str, param: float, balanced: bool, mcfg: dict, seed: i
     return est
 
 
-def build_tfidf(mcfg: dict, param: float, balanced: bool, seed: int = 42):
-    return make_pipeline(build_features(mcfg),
+def build_tfidf(mcfg: dict, param: float, balanced: bool, seed: int = 42, columns=("text",)):
+    return make_pipeline(build_features(mcfg, columns),
                          build_estimator(mcfg.get("clf", "lr"), param, balanced, mcfg, seed))
 
 
@@ -84,16 +99,22 @@ def fit_and_score(cfg, train, val, test, n_labels, log=print):
         log("  note: ComplementNB has no class_weight; its own weighting handles the imbalance")
     grid = mcfg.get("param_grid") or mcfg.get("C_grid") or DEFAULT_GRIDS[kind]
     unit = "C" if kind in ("lr", "svm") else "alpha"
-    fit, ev = split_rows(train)
+    cols = text_columns(cfg)
+    if cols != ["text"]:
+        log(f"  text_type={cfg['data']['text_type']} -> dac trung tu cot {cols}")
+    fit, ev = split_rows(require_columns(train, cols, "train"))
+    require_columns(val, cols, "val")
+    if test is not None:
+        require_columns(test, cols, "test")
     best = None
     for param in grid:
-        pipe = build_tfidf(mcfg, param, balanced, cfg.get("seed", 42)).fit(fit.text, fit.y)
-        p_eval = _proba(pipe, ev.text)
+        pipe = build_tfidf(mcfg, param, balanced, cfg.get("seed", 42), cols).fit(fit[cols], fit.y)
+        p_eval = _proba(pipe, ev[cols])
         m = compute_metrics(ev.y, p_eval.argmax(1))
         log(f"  {unit}={param}: macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f}")
         if best is None or m["macro_f1"] > best["macro_f1"]:
             best = {"macro_f1": m["macro_f1"], "C": param, "unit": unit,
                     "balanced": balanced, "eval": p_eval,
-                    "val": _proba(pipe, val.text),
-                    "test": None if test is None else _proba(pipe, test.text)}
+                    "val": _proba(pipe, val[cols]),
+                    "test": None if test is None else _proba(pipe, test[cols])}
     return best
