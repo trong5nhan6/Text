@@ -185,9 +185,31 @@ held-out. Giá trị được chọn hiện trong `results/metrics.csv`, ví d�
 
 Chạy cả năm: mỗi run ~10 giây, và **blend của chúng hơn hẳn model đơn tốt nhất** — `cnb` tuy điểm
 thấp nhưng chỉ đồng thuận 73–79% với nhóm tuyến tính nên đóng góp nhiều nhất cho ensemble.""")
-code('''for c in ['lr', 'svm', 'ridge', 'cnb', 'sgd']:
-    for t in ['a', 'b']:
-        !python train.py --config configs/tfidf.yaml --task {t} --set model.clf={c}''')
+code('''import time
+
+CLFS  = ['lr', 'svm', 'ridge', 'cnb', 'sgd']
+TASKS_ML = ['a', 'b']
+
+t0 = time.time()
+for i, c in enumerate(CLFS):
+    for j, t in enumerate(TASKS_ML):
+        n = i * len(TASKS_ML) + j + 1
+        print("")
+        print("-" * 72)
+        print(f"[{n}/{len(CLFS) * len(TASKS_ML)}]  clf = {c:6s} |  task = {t}  |  "
+              f"+{time.time() - t0:.0f}s")
+        print("-" * 72, flush=True)
+        !python train.py --config configs/tfidf.yaml --task {t} --set model.clf={c}
+print("")
+print(f"xong {len(CLFS) * len(TASKS_ML)} run trong {time.time() - t0:.0f}s")''')
+
+md("**Bảng tổng kết + blend ngay** (macro-F1 trên lát held-out; blend dùng greedy forward selection):")
+code('''import pandas as pd
+d = pd.read_csv('results/metrics.csv')
+display(d[d.run.str.startswith('tfidf')][['task', 'run', 'macro_f1', 'accuracy', 'model']]
+        .sort_values(['task', 'macro_f1'], ascending=[True, False]))
+!python evaluate.py --task a --optimize
+!python evaluate.py --task b --optimize''')
 
 code('''# Dò tham số mịn hơn quanh giá trị vừa chọn (nhớ --run_suffix, nếu không script từ chối chạy):
 # !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge "model.param_grid=[1,2,3,5,8]" --run_suffix _fine
