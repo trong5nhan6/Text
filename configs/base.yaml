@@ -43,7 +43,7 @@ model:
   freeze_embeddings: null   # null = follow unfreeze_last_n_blocks | true | false
 
 training:
-  epochs: 6                 # also the LR schedule length: warmup 10% then linear decay to 0 at
+  epochs: 20                 # also the LR schedule length: warmup 10% then linear decay to 0 at
                             # the last step, so this must stay close to where training converges.
                             # Fine-tuning on 2.8k-5.7k rows peaks at 2-4 epochs; at 30 the LR never
                             # annealed and every epoch past ~3 was noise.
@@ -61,7 +61,7 @@ training:
   class_weight: sqrt_inv    # none | inverse | sqrt_inv  (used by wce / focal)
   focal_gamma: 2.0
   label_smoothing: 0.0
-  early_stopping_patience: 5   # >= epochs on purpose: run the full schedule so the LR anneals,
+  early_stopping_patience: 3   # >= epochs on purpose: run the full schedule so the LR anneals,
                               # and keep the best epoch's weights. Stopping early would cut the
                               # anneal short, which is where most of the gain is.
 
