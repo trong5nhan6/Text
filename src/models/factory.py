@@ -18,6 +18,7 @@ if _QUIET:
     hf_logging.disable_progress_bar()       # the "Loading weights" bar; verbosity is left alone
 
 from src.models.classifier import TransformerClassifier
+from src.models.heads import head_config
 
 
 def build_tokenizer(cfg_or_name):
@@ -31,7 +32,8 @@ def build_model(cfg, num_labels: int):
         raise ValueError(f"build_model only handles transformers, got {m['type']} (tfidf -> src.models.tfidf)")
     return TransformerClassifier(m["name"], num_labels, m.get("pooling", "cls"), m.get("dropout", 0.1),
                                  unfreeze_last_n_blocks=m.get("unfreeze_last_n_blocks"),
-                                 freeze_embeddings=m.get("freeze_embeddings"))
+                                 freeze_embeddings=m.get("freeze_embeddings"),
+                                 head_cfg=head_config(m))
 
 
 def load_from_checkpoint(ckpt_dir):

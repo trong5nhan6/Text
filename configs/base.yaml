@@ -42,6 +42,20 @@ model:
   unfreeze_last_n_blocks: null
   freeze_embeddings: null   # null = follow unfreeze_last_n_blocks | true | false
 
+  # Classification head.  linear = 768 -> n_labels, what every finished run used.
+  #   sparse_moe  top-k routed mixture of MLP experts on the pooled vector (Shazeer 2017)
+  #   soft_moe    Soft MoE over the TOKEN sequence (Puigcerver 2023) -- it aggregates the tokens
+  #               itself, so `pooling` above is ignored when this head is selected
+  # Size check before turning these on: the linear head is 4,614 params, a 4-expert MoE with
+  # expert_dim 64 is ~201k, fitted on 2.8k-5.7k rows by a model that already reaches train-F1
+  # 0.99. More head capacity is not what the held-out gap is short of.
+  head: linear              # linear | sparse_moe | soft_moe
+  moe_experts: 4            # both MoE heads
+  moe_expert_dim: 64        # hidden width of one expert MLP; 64 -> ~201k, 256 -> ~797k
+  moe_top_k: 2              # sparse_moe only: experts active per example (1 = Switch routing)
+  moe_slots: 1              # soft_moe only: slots per expert
+  moe_dropout: 0.1          # inside each expert
+
 training:
   epochs: 20                 # also the LR schedule length: warmup 10% then linear decay to 0 at
                             # the last step, so this must stay close to where training converges.
@@ -65,6 +79,9 @@ training:
   loss: auto                # auto (a: ce, b: focal) | ce | wce | focal
   class_weight: sqrt_inv    # none | inverse | sqrt_inv  (used by wce / focal)
   focal_gamma: 2.0
+  moe_aux_weight: 0.01      # sparse_moe only: weight of the load-balancing loss. 0 disables it,
+                            # and the router then collapses onto one expert within a few hundred
+                            # steps -- which shows up as a mediocre score, never as an error.
   label_smoothing: 0.0
   early_stopping_patience: 3   # >= epochs on purpose: run the full schedule so the LR anneals,
                               # and keep the best epoch's weights. Stopping early would cut the

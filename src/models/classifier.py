@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 
+from src.models.heads import build_head
+
 _BLOCK_RE = re.compile(r"^(?P<prefix>.+?)\.(?P<idx>\d+)\.")
 
 
@@ -32,7 +34,7 @@ class TransformerClassifier(nn.Module):
 
     def __init__(self, backbone_name: str, num_labels: int, pooling: str = "cls",
                  dropout: float = 0.1, backbone_config=None,
-                 unfreeze_last_n_blocks=None, freeze_embeddings=None):
+                 unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None):
         super().__init__()
         if backbone_config is None:                      # training: load pretrained weights
             # .float() is not redundant: some published checkpoints store fp16 weights
@@ -44,12 +46,15 @@ class TransformerClassifier(nn.Module):
             # .float() for the same reason, from the other direction: a config saved off an fp16
             # backbone builds an fp16 one, and load_state_dict copies in place, so fp16 would stick.
             self.backbone = AutoModel.from_config(backbone_config).float()
+        head_cfg = dict(head_cfg or {"head": "linear"})
         self.meta = {"backbone_name": backbone_name, "num_labels": num_labels,
-                     "pooling": pooling, "dropout": dropout}
+                     "pooling": pooling, "dropout": dropout, "head_cfg": head_cfg}
         self.pooling = pooling
         self.dropout = nn.Dropout(dropout)
-        self.head = nn.Linear(self.backbone.config.hidden_size, num_labels)
-        nn.init.normal_(self.head.weight, std=0.02); nn.init.zeros_(self.head.bias)
+        # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
+        # excludes it from the LLRD ladder by that prefix, and both must keep holding.
+        self.head = build_head(head_cfg.get("head"), self.backbone.config.hidden_size,
+                               num_labels, head_cfg)
         self.freeze_summary = self._apply_freezing(unfreeze_last_n_blocks, freeze_embeddings)
 
     def _apply_freezing(self, unfreeze_last_n, freeze_emb) -> str:
@@ -110,12 +115,23 @@ class TransformerClassifier(nn.Module):
         if token_type_ids is not None:
             kw["token_type_ids"] = token_type_ids
         h = self.backbone(**kw).last_hidden_state
+        # soft_moe aggregates the token axis itself, so it takes the sequence and `pooling` is
+        # unused. Every other head takes the pooled vector, with dropout applied here so that
+        # `linear` stays exactly what it was.
+        if getattr(self.head, "needs_tokens", False):
+            return self.head(h, attention_mask)
         if self.pooling == "mean":
             m = attention_mask.unsqueeze(-1).to(h.dtype)
             pooled = (h * m).sum(1) / m.sum(1).clamp(min=1e-6)
         else:
             pooled = h[:, 0]
         return self.head(self.dropout(pooled))
+
+    @property
+    def aux_loss(self):
+        """Router load-balancing term of a sparse MoE head; 0.0 for every other head, which the
+        trainer can add unconditionally."""
+        return getattr(self.head, "aux_loss", 0.0)
 
     def param_groups(self, lr, head_lr, weight_decay, llrd=None):
         """Optimizer groups. Two schemes, chosen by `training.llrd`:
@@ -186,8 +202,9 @@ class TransformerClassifier(nn.Module):
         ckpt_dir = Path(ckpt_dir)
         meta = json.load(open(ckpt_dir / "meta.json"))
         bcfg = AutoConfig.from_pretrained(ckpt_dir / "backbone")
+        # .get: checkpoints written before model.head existed carry no head_cfg and are linear.
         model = cls(meta["backbone_name"], meta["num_labels"], meta["pooling"], meta["dropout"],
-                    backbone_config=bcfg)
+                    backbone_config=bcfg, head_cfg=meta.get("head_cfg"))
         sd = torch.load(ckpt_dir / "model.pt", map_location=map_location)
         model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in sd.items()})
         return model, meta
