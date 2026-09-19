@@ -44,6 +44,7 @@ KNOBS = [
     ("data.tta", "CHI transformer: infer ca 2 chu viet roi trung binh (tfidf se bi tu choi)"),
     ("data.max_len", "Religion / Geo-political dai hon, hay bi cat o 96"),
     ("--- model ---", None),
+    ("model.name", "DE len MOI config trong CONFIGS -> chi bo # khi chay dung 1 config"),
     ("model.pooling", "cls | mean"),
     ("model.dropout", None),
     ("model.unfreeze_last_n_blocks", "null = train tat ca | 4 = chi 4 khoi cuoi | 0 = chi head"),
@@ -83,6 +84,13 @@ def _overrides_cell() -> str:
         lines.append(f"{entry.ljust(width + 20)}# {note}" if note else entry)
     lines.append("}")
     return "\n".join(lines) + """
+# Checkpoint da fine-tune san tren Kannada code-mixed -- dung config rieng thi tot hon la
+# doi model.name o tren, vi run se co ten rieng thay vi de len run cua muril/roberta:
+#   configs/cnerg_muril.yaml   Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL   (goc muril)
+#   configs/cnerg_xlmr.yaml    Hate-speech-CNERG/deoffxlmr-mono-kannada            (goc xlm-r)
+#   configs/muril_large.yaml   google/muril-large-cased      24 block, ~505M
+#   configs/roberta_large.yaml xlm-roberta-large             24 block, 561M
+
 RUN_SUFFIX = ''        # vi du '_e8' -> run ten muril_focal_s42_e8. BAT BUOC khi doi gia tri that su.
 
 # doi data.val_ratio / data.split_seed se chia lai split, moi ket qua cu se het so sanh duoc
