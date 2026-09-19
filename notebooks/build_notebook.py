@@ -33,6 +33,7 @@ KNOBS = [
     ("training.epochs", "tran, khong phai muc tieu; cung la do dai lich LR"),
     ("training.early_stopping_patience", "dung khi macro-F1 khong cai thien bay nhieu epoch lien"),
     ("training.lr", "learning rate cua backbone (head dung head_lr)"),
+    ("training.llrd", "layer-wise LR decay: null = lr phang | 0.9 = moi block duoi giam 0.9 lan"),
     ("training.batch_size", None),
     ("training.grad_accum", "tang len khi giam batch_size, de giu batch hieu dung"),
     ("training.loss", "auto | ce | wce | focal   (auto: task a -> ce, task b -> focal)"),

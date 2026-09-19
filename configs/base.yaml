@@ -52,6 +52,11 @@ training:
   grad_accum: 1
   lr: 2.0e-5
   head_lr: 1.0e-4           # classifier head is trained from scratch
+  llrd: null                # layer-wise LR decay. null = one flat lr for the whole backbone.
+                            # 0.9 = each block gets 0.9x the LR of the block above it, so the
+                            # last block trains at `lr` and block 0 at lr*0.9**12. Keeps the
+                            # lower blocks' multilingual features from being overwritten on
+                            # 3k-6k rows. Try 0.95 (gentle) .. 0.85 (strong). Head keeps head_lr.
   weight_decay: 0.01
   warmup_ratio: 0.1
   max_grad_norm: 1.0

@@ -117,18 +117,59 @@ class TransformerClassifier(nn.Module):
             pooled = h[:, 0]
         return self.head(self.dropout(pooled))
 
-    def param_groups(self, lr, head_lr, weight_decay):
+    def param_groups(self, lr, head_lr, weight_decay, llrd=None):
+        """Optimizer groups. Two schemes, chosen by `training.llrd`:
+
+        llrd=None -- one flat `lr` for the whole backbone (plus `head_lr` for the head).
+        llrd=0.9  -- layer-wise LR decay: every block gets 0.9x the LR of the block above it,
+            so the last block trains at `lr`, block 0 at lr*0.9**n_blocks, and the embeddings
+            one notch below that. The lower blocks are what makes a multilingual checkpoint
+            worth starting from -- on 3k-6k rows a flat 2e-5 rewrites them faster than the task
+            signal can justify, and the encoder ends up no better than char n-grams.
+
+        The head is excluded from the decay in both cases: it is randomly initialised, so there
+        is nothing in it to preserve, and it keeps `head_lr`.
+
+        Frozen parameters are skipped, so this composes with unfreeze_last_n_blocks: the decay
+        is still indexed by absolute block number, and whatever is frozen simply never appears.
+        """
         no_decay = ("bias", "LayerNorm.weight", "layer_norm", "layernorm", "norm.weight")
+        prefix, n_blocks = block_layout(self.backbone)
+        prefix = None if prefix is None else f"backbone.{prefix}"
+
+        def depth(name):
+            """0 = embeddings, 1..n_blocks = blocks bottom-up, n_blocks+1 = the tail above them."""
+            if "embed" in name.lower():
+                return 0
+            m = _BLOCK_RE.match(name) if prefix else None
+            if m and m.group("prefix") == prefix:
+                return int(m.group("idx")) + 1
+            return n_blocks + 1
+
+        trainable = [(n, p) for n, p in self.named_parameters()
+                     if p.requires_grad and not n.startswith("head.")]
+        # The exponent is measured from the topmost depth that actually has parameters, not from
+        # n_blocks+1: BertModel has nothing above its last block (its pooler is frozen here), so a
+        # fixed ceiling would leave that rung empty and shift the whole ladder down one notch --
+        # the last block would train at 0.9*lr instead of lr. mDeBERTa, which does keep an
+        # encoder.LayerNorm up there, gives that module lr and the last block 0.9*lr.
+        top = max((depth(n) for n, _ in trainable), default=0)
+
         groups = {}
         for n, p in self.named_parameters():
             if not p.requires_grad:
                 continue
-            is_head = n.startswith("head.")
             wd = 0.0 if any(nd in n for nd in no_decay) else weight_decay
-            key = (is_head, wd)
-            groups.setdefault(key, {"params": [], "weight_decay": wd, "lr": (head_lr or lr) if is_head else lr})
+            if n.startswith("head."):
+                key, p_lr = ("head", wd), head_lr or lr
+            elif llrd:
+                d = depth(n)
+                key, p_lr = (d, wd), lr * llrd ** (top - d)
+            else:
+                key, p_lr = ("backbone", wd), lr
+            groups.setdefault(key, {"params": [], "weight_decay": wd, "lr": p_lr})
             groups[key]["params"].append(p)
-        return list(groups.values())
+        return [groups[k] for k in sorted(groups, key=lambda k: (str(k[0]), k[1]))]
 
     # ---------- checkpoint I/O ----------
     def save(self, out_dir, tokenizer=None, half=True, extra=None):

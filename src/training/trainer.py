@@ -46,7 +46,12 @@ class Trainer:
         dl_tr = make_loader(train_df.text.tolist(), train_df.y.tolist(), self.tok, self.cfg, train=True)
         dl_va = make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False)
 
-        opt = torch.optim.AdamW(self.model.param_groups(t["lr"], t.get("head_lr"), t["weight_decay"]))
+        pg = self.model.param_groups(t["lr"], t.get("head_lr"), t["weight_decay"], t.get("llrd"))
+        opt = torch.optim.AdamW(pg)
+        if t.get("llrd"):
+            back = [g["lr"] for g in pg if g["lr"] != (t.get("head_lr") or t["lr"])] or [t["lr"]]
+            self.log.info(f"llrd={t['llrd']}: {len(pg)} nhom, lr backbone "
+                          f"{min(back):.2e} (duoi) -> {max(back):.2e} (tren)")
         steps = math.ceil(len(dl_tr) / t["grad_accum"]) * t["epochs"]
         sch = get_linear_schedule_with_warmup(opt, int(t["warmup_ratio"] * steps), steps)
         scaler = torch.amp.GradScaler(enabled=self.amp_dtype == torch.float16)
