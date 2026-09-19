@@ -430,6 +430,19 @@ code('''%cd /kaggle/working
 !unzip -l submissions.zip | head -8
 %cd /kaggle/working/repo''')
 
+md("""**Nén cả `results/`** — nhat.npy, metrics.json, history.json, per_class.csv, confusion.png
+cua moi run, cong metrics.csv. Day la thu ban can de phan tich o may va viet bai bao; `checkpoints/`
+KHONG nam trong do (moi run ~0,5 GB).""")
+code('''%cd /kaggle/working
+!rm -f results.zip
+# bo checkpoint va file nop (da co submissions.zip rieng) cho nhe
+!zip -r -q results.zip repo/results -x "repo/results/submissions/*"
+!ls -lh /kaggle/working/results.zip
+!unzip -l results.zip | tail -5
+import glob
+print("so run co ket qua:", len(glob.glob('/kaggle/working/repo/results/*/*/metrics.json')))
+%cd /kaggle/working/repo''')
+
 def write(filename: str):
     nb = {"cells": list(cells),
           "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},

@@ -64,6 +64,7 @@ class Trainer:
         history, bad = [], 0
         for ep in range(1, t["epochs"] + 1):
             self.model.train(); t0 = time.time(); total = 0.0; aux_sum = 0.0
+            tr_pred, tr_true = [], []
             opt.zero_grad(set_to_none=True)
             for i, batch in enumerate(dl_tr):
                 batch = {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
@@ -71,6 +72,12 @@ class Trainer:
                 with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype or torch.float32,
                                     enabled=self.amp_dtype is not None):
                     logits = self.model(**batch)
+                # Running train scores, gathered from the forward passes the step already did, so
+                # they cost nothing. They are NOT a clean evaluation: dropout is on and the
+                # weights move between batches, so early-epoch batches are scored by a worse
+                # model than late-epoch ones. Read them for the train/held-out gap, not as an
+                # exact number.
+                tr_pred.append(logits.detach().argmax(-1).cpu()); tr_true.append(y.detach().cpu())
                 loss = self.loss_fn(logits.float(), y)
                 aux = self.model.aux_loss          # 0.0 unless the head is a sparse MoE
                 if aux_w:
@@ -88,11 +95,15 @@ class Trainer:
             p_va = predict_proba(self.model, dl_va, self.device, self.amp_dtype)
             m = compute_metrics(valid_df.y, p_va.argmax(1))
             aux_avg = aux_sum / len(dl_tr) if aux_w else None
+            tm = compute_metrics(torch.cat(tr_true).numpy(), torch.cat(tr_pred).numpy())
             history.append({"epoch": ep, "loss": round(total / len(dl_tr), 4),
+                            "train_macro_f1": round(tm["macro_f1"], 4),
+                            "train_accuracy": round(tm["accuracy"], 4),
                             **({"moe_aux": round(aux_avg, 4)} if aux_w else {}), **m})
             improved = m["macro_f1"] > best["f1"]
             self.log.info(f"ep {ep}/{t['epochs']} loss {total / len(dl_tr):.4f} "
-                          f"macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} "
+                          f"| train F1 {tm['macro_f1']:.4f} acc {tm['accuracy']:.4f} "
+                          f"| eval F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} "
                           + (f"moe_aux {aux_avg:.3f} " if aux_w else "")
                           + f"({time.time() - t0:.0f}s){' *' if improved else ''}")
             if improved:
