@@ -1,0 +1,32 @@
+# MuRIL large (24 blocks, hidden 1024, ~505M params) -- the biggest checkpoint in this repo that
+# was actually pretrained on romanised Indian-language text, so of the large models it is the one
+# with a real claim on Kanglish. XLM-R large is bigger but has no transliteration in its corpus.
+#
+# Settings below are the small-data recipe, not the base recipe scaled up. Fine-tuning a 24-block
+# encoder on 2.8k-5.7k rows collapses to a single class easily, and a Kaggle T4 (compute 7.5) has
+# no bf16, so fp16 is forced -- which is exactly where large models diverge. Hence lr 1e-5, a
+# longer warmup, and layer-wise decay to keep the lower blocks near their pretrained values.
+#
+#   python train.py --config configs/muril_large.yaml --task b
+#
+# Run one seed first and read history.json: if macro-F1 sits at the majority-class value for two
+# epochs, it has collapsed -- halve lr again rather than training longer. Always compare against
+# muril-base over 3 seeds; on this much data large does not reliably win.
+_base_: base.yaml
+model:
+  name: google/muril-large-cased
+training:
+  lr: 1.0e-5              # 2e-5 diverges on a 24-block encoder in fp16
+  epochs: 5               # set here, NOT inherited: warmup_ratio 0.2 of base.yaml's 20 epochs
+                          # would be 4 epochs of warmup, and the run would end before the LR ever
+                          # annealed. 5 epochs -> warmup 1, then a real decay to 0.
+  early_stopping_patience: 5   # = epochs, i.e. off: the trainer keeps the best epoch's weights
+                          # anyway, so stopping early only costs the anneal.
+  llrd: 0.95              # 0.95, not the 0.9 used for 12-block models: the ladder now spans 24
+                          # rungs, and 0.9**24 = 0.08 would leave the embeddings at 8e-7, which is
+                          # freezing them rather than decaying them. 0.95**24 = 0.29 -> 2.9e-6.
+                          # Drop to 0.9 only if the run overfits the top blocks.
+  warmup_ratio: 0.2       # twice the base recipe; large models need longer to leave init
+  batch_size: 16          # ~13 GB on a T4 at max_len 96
+  grad_accum: 2           # effective batch 32, same as the base configs
+  eval_batch_size: 32

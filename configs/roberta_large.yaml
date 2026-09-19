@@ -1,0 +1,28 @@
+# XLM-RoBERTa large (24 blocks, hidden 1024, 561M params). Bigger than muril-large and trained on
+# 100 languages, but its CommonCrawl corpus holds Kannada only in Kannada script -- romanised
+# Kanglish is out of distribution for it. Useful mainly as a second, differently-biased member of
+# an ensemble; try configs/muril_large.yaml first.
+#
+#   python train.py --config configs/roberta_large.yaml --task b
+#
+# XLM-R large is the most collapse-prone checkpoint here: on a few thousand rows it regularly ends
+# up predicting one class for everything. That failure is silent in the final number, so read
+# history.json rather than the summary line.
+_base_: base.yaml
+model:
+  name: xlm-roberta-large
+training:
+  lr: 1.0e-5
+  epochs: 5               # set here, NOT inherited: warmup_ratio 0.2 of base.yaml's 20 epochs
+                          # would be 4 epochs of warmup, and the run would end before the LR ever
+                          # annealed. 5 epochs -> warmup 1, then a real decay to 0.
+  early_stopping_patience: 5   # = epochs, i.e. off: the trainer keeps the best epoch's weights
+                          # anyway, so stopping early only costs the anneal.
+  llrd: 0.95              # 0.95, not the 0.9 used for 12-block models: the ladder now spans 24
+                          # rungs, and 0.9**24 = 0.08 would leave the embeddings at 8e-7, which is
+                          # freezing them rather than decaying them. 0.95**24 = 0.29 -> 2.9e-6.
+                          # Drop to 0.9 only if the run overfits the top blocks.
+  warmup_ratio: 0.2
+  batch_size: 16          # ~14 GB on a T4 at max_len 96
+  grad_accum: 2
+  eval_batch_size: 32
