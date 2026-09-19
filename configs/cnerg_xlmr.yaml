@@ -1,0 +1,18 @@
+# XLM-R fine-tuned on the Kannada split of DravidianCodeMix offensive language identification
+# (Hate-speech-CNERG). Same architecture as configs/roberta.yaml: 12 blocks, hidden 768.
+#
+# Its source task is the 6-way offensive scheme -- Not_offensive, Not_in_intended_language,
+# Profanity, Off_target_ind / _group / _other -- which is closer to task b's 6 categories in
+# shape than to task a's binary split, though the categories themselves differ.
+#
+# Pairs with configs/cnerg_muril.yaml: same idea, different pretraining corpus, so the two make
+# genuinely different errors and are worth blending rather than choosing between.
+#
+#   python train.py --config configs/cnerg_xlmr.yaml --task b
+#
+# A note on the load log: `pooler.dense.*` comes up MISSING. Harmless -- the checkpoint was saved
+# without a pooler, forward() reads last_hidden_state, and _apply_freezing() freezes pooler.* so
+# the freshly initialised weights never train and never reach the output.
+_base_: base.yaml
+model:
+  name: Hate-speech-CNERG/deoffxlmr-mono-kannada

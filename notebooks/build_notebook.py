@@ -284,7 +284,10 @@ Trên T4 mỗi run ≈ **4–7 phút** (task A 180 step/epoch, task B 89 step/ep
 > model hội tụ.""")
 code('''import time
 
-CONFIGS = ['muril', 'roberta', 'indicbert', 'bert', 'deberta', 'modernbert']  # bo bot neu thieu gio
+CONFIGS = ['muril', 'roberta', 'indicbert', 'bert', 'deberta', 'modernbert',
+           'cnerg_muril', 'cnerg_xlmr']            # bo bot neu thieu gio
+# cnerg_* = checkpoint DA fine-tune san tren abusive/offensive Kannada code-mixed;
+#   cung kien truc va cung tham so train voi muril/roberta, chi khac diem xuat phat.
 # Ban large (24 block, ~500M): them 'muril_large' / 'roberta_large'. Cham hon ~3 lan va
 # hay sup ve mot lop tren du lieu nho -- doc history.json truoc khi tin con so cuoi.
 TASKS   = ['a', 'b']

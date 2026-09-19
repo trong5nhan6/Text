@@ -1,0 +1,20 @@
+# MuRIL already fine-tuned on code-mixed Kannada abusive speech (Hate-speech-CNERG).
+# Same architecture as configs/muril.yaml -- 12 blocks, hidden 768, vocab 197285 -- so this is a
+# checkpoint swap, not a new model. AutoModel loads the encoder and drops the checkpoint's own
+# classification head, which is what we want: the encoder has already been moved toward Kanglish
+# abuse by a supervised task, and our head starts fresh on HASTIKA's labels.
+#
+# This is intermediate-task transfer done by someone else. The 6,453 rows of DravidianCodeMix
+# Kannada in data/external_offenseval_kn.csv cannot simply be concatenated into training --
+# measured at +0.0012 +/- 0.0087 on task a, i.e. nothing, because "offensive" and "hate" are not
+# the same label. Arriving through the encoder instead of through the label space is the point.
+#
+#   python train.py --config configs/cnerg_muril.yaml --task a
+#   python train.py --config configs/cnerg_muril.yaml --task b
+#
+# Training settings are deliberately left at base.yaml's, identical to configs/muril.yaml, so the
+# difference between the two runs is the checkpoint and nothing else. Tune only after that
+# comparison says the checkpoint is worth keeping.
+_base_: base.yaml
+model:
+  name: Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL
