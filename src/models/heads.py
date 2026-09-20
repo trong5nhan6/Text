@@ -64,16 +64,20 @@ class SparseMoEHead(nn.Module):
         self.aux_loss = 0.0          # plain attribute, not a buffer: it must stay out of state_dict
 
     def forward(self, x, attention_mask=None):
-        # fp32 router: under autocast the logits would be fp16, and a softmax over a handful of
-        # close logits there quantises the gate badly enough to change which expert wins.
-        logits = self.router(x.float())
-        top, idx = logits.topk(self.top_k, dim=-1)
-        gate = torch.zeros_like(logits).scatter_(1, idx, top.softmax(-1))
+        # Autocast has to be switched off, not worked around with .float(): it rewrites the ops,
+        # so nn.Linear returns fp16 whatever its input dtype, while softmax is on the fp32 list
+        # and returns fp32. Mixing the two is both a silent precision bug (a softmax over a few
+        # close logits in fp16 quantises enough to change which expert wins) and a hard error --
+        # scatter_ refuses an fp16 destination with an fp32 source.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            logits = self.router(x.float())
+            top, idx = logits.topk(self.top_k, dim=-1)
+            gate = torch.zeros_like(logits).scatter_(1, idx, top.softmax(-1))
 
-        P = logits.softmax(-1).mean(0)                       # mean router probability per expert
-        f = torch.zeros_like(P).scatter_add_(
-            0, idx.reshape(-1), torch.ones(idx.numel(), device=P.device, dtype=P.dtype))
-        self.aux_loss = self.n_experts * (f / idx.numel() * P).sum()
+            P = logits.softmax(-1).mean(0)                   # mean router probability per expert
+            f = torch.zeros_like(P).scatter_add_(
+                0, idx.reshape(-1), torch.ones(idx.numel(), device=P.device, dtype=P.dtype))
+            self.aux_loss = self.n_experts * (f / idx.numel() * P).sum()
 
         y = torch.stack([e(x) for e in self.experts], dim=1)  # [B, E, C]
         return (gate.unsqueeze(-1).to(y.dtype) * y).sum(1)
@@ -111,21 +115,25 @@ class SoftMoEHead(nn.Module):
                                      for _ in range(experts))
 
     def forward(self, h, attention_mask=None):
-        # logits[b, t, j]: affinity of token t for slot j.  fp32 for the same reason as above.
-        logits = h.float() @ self.phi.float()                       # [B, T, E*s]
-        if attention_mask is not None:
-            pad = (attention_mask == 0).unsqueeze(-1)
-            logits = logits.masked_fill(pad, torch.finfo(logits.dtype).min)
+        # Autocast off for the same reason as SparseMoEHead: it would make the matmul fp16 and
+        # the softmax fp32 regardless of the inputs' dtype. Here the dispatch softmax runs over
+        # the token axis, where fp16 on a padded row of -65504 is especially lossy.
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            logits = h.float() @ self.phi.float()                   # [B, T, E*s]
+            if attention_mask is not None:
+                pad = (attention_mask == 0).unsqueeze(-1)
+                logits = logits.masked_fill(pad, torch.finfo(logits.dtype).min)
 
-        dispatch = logits.softmax(dim=1)                            # over tokens -> slot contents
-        slots = torch.einsum("btj,bth->bjh", dispatch, h.float())   # [B, E*s, H]
+            dispatch = logits.softmax(dim=1)                        # over tokens -> slot contents
+            slots = torch.einsum("btj,bth->bjh", dispatch, h.float())   # [B, E*s, H]
         slots = self.drop(slots).to(h.dtype)
 
         per_slot = slots.view(h.size(0), self.n_experts, self.slots, -1)
         y = torch.stack([e(per_slot[:, i]) for i, e in enumerate(self.experts)], dim=1)
         y = y.reshape(h.size(0), self.n_experts * self.slots, -1)   # [B, E*s, C]
 
-        combine = logits.softmax(dim=2)                             # over slots -> back to tokens
+        with torch.autocast(device_type=h.device.type, enabled=False):
+            combine = logits.softmax(dim=2)                         # over slots -> back to tokens
         out = torch.einsum("btj,bjc->btc", combine.to(y.dtype), y)  # [B, T, C]
         if attention_mask is None:
             return out.mean(1)
