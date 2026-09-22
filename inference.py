@@ -44,6 +44,27 @@ def predict_checkpoint_dir(run_ckpt: Path, texts, batch_size=64, precision="auto
     return out
 
 
+def hard_vote(probs, weights):
+    """Majority vote over each model's predicted label -> a one-hot-ish matrix of vote shares.
+
+    Soft voting averages probabilities and is usually the better choice, because it keeps how
+    sure each model was. It assumes the numbers are comparable across models, and in this repo
+    they are not always: LinearSVC and RidgeClassifier have no predict_proba, so tfidf.py feeds
+    their decision function through softmax(d * 2.0) -- monotone, so their own argmax is right,
+    but on an arbitrary scale next to a real probability. Averaging those together lets whichever
+    model happens to produce the largest numbers dominate. Hard voting throws the magnitudes away
+    and keeps only the decision, which is exactly the right trade when the magnitudes are junk.
+
+    Ties are broken by the weighted probability sum, scaled small enough that it can only ever
+    separate equal vote counts, never outrank a model that won outright.
+    """
+    votes = np.zeros_like(probs[0], dtype=float)
+    for wi, pi in zip(weights, probs):
+        votes[np.arange(len(pi)), pi.argmax(1)] += wi
+    soft = sum(wi * pi for wi, pi in zip(weights, probs))
+    return votes + 1e-6 * soft
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", choices=["a", "b"], required=True)
@@ -54,6 +75,9 @@ def main():
     ap.add_argument("--tfidf_runs", nargs="*", default=[],
                     help="mode 2: add TF-IDF runs (their {split}.npy must match --input; use --split)")
     ap.add_argument("--weights", nargs="*", type=float)
+    ap.add_argument("--vote", choices=["soft", "hard"], default="soft",
+                    help="soft: weighted average of probabilities (default). "
+                         "hard: majority vote over each model's predicted label.")
     ap.add_argument("--tag")
     ap.add_argument("--config", default="configs/base.yaml")
     a = ap.parse_args()
@@ -108,7 +132,11 @@ def main():
             n = sum(1 for f in evs if not f.exists())
             print(f"  {'BLEND':35s} khong cham duoc ({n}/{len(evs)} run khong co eval.npy). "
                   f"Trong so phai lay tu ban 90% tuong ung.")
-    p = sum(wi * pi for wi, pi in zip(w, probs))
+    p = hard_vote(probs, w) if a.vote == "hard" else sum(wi * pi for wi, pi in zip(w, probs))
+    if a.vote == "hard":
+        soft = sum(wi * pi for wi, pi in zip(w, probs))
+        n_diff = int((p.argmax(1) != soft.argmax(1)).sum())
+        print(f"  vote=hard: {n_diff}/{len(p)} dong khac voi soft vote")
     assert len(p) == len(inp)
     tag = a.tag or "+".join(names)[:80]
     write_submission(inp.id.values, p, labels, res / "submissions" / f"{a.task}_{split_name}_{tag}")
