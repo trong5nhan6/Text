@@ -701,3 +701,113 @@ shutil.copy(CACHE, "/kaggle/working/mt_en.json")
 print(f"tai ve: /kaggle/working/mt_en.json  ({CACHE.stat().st_size/1e6:.1f} MB)")''')
 
 write("build_mt_cache.ipynb")
+
+
+# =====================================================================================
+#  Notebook 4 -- domain-adaptive MLM. Produces an adapted checkpoint that train.py can be
+#  pointed at; kept separate because it runs once and its output is reused by every run.
+# =====================================================================================
+md(f"""# Domain-adaptive pretraining — MLM trên Kanglish
+
+**Settings:** Accelerator = **GPU T4 ×2** · Internet = **On** · ~25 phút
+
+Từ vựng của MuRIL được xây cho tiếng Ấn viết bằng **chữ bản địa**, nên Kanglish chữ Latin bị xé
+vụn: **2,05 mảnh/từ** so với **1,04** của tiếng Anh, và chỉ **36,7%** từ còn nguyên một mảnh.
+
+```
+government    ->  ['government']                        (tiếng Anh, 1 mảnh)
+Bajetigu      ->  ['Ba', '##jet', '##ig', '##u']        (Kanglish, 4 mảnh)
+```
+
+Embedding của `##jet`, `##ikk` được học trong ngữ cảnh **chẳng liên quan gì** tới tiếng Kannada.
+MLM kéo chúng về đúng chỗ — và vì nó **không cần nhãn**, nó tránh được đúng vấn đề đã giết chết
+phương án nối dữ liệu ngoài vào train (đo được +0,0012 ± 0,0087, tức bằng không): *"offensive"*
+khác *"hate"*, nhưng văn bản thì vẫn cùng một ngôn ngữ.
+
+**Nói thẳng về quy mô:** kho của bạn ~**0,31 triệu token**, trong khi MuRIL pretrain trên ~16 **tỷ**
+và các bài DAPT thường dùng 1–100 triệu. Thứ cứu vớt là chỉ **8.405 mục từ vựng (4,3%)** thực sự
+xuất hiện, nên toàn bộ ngân sách dồn đúng vào những embedding đang sai. Kỳ vọng **+0,01 đến
++0,03**, không phải bước nhảy.""")
+
+code(f'''import os, subprocess, sys
+
+REPO, BRANCH, WORK = "{REPO}", "{BRANCH}", "/kaggle/working"
+TOKEN = ""
+try:
+    from kaggle_secrets import UserSecretsClient
+    TOKEN = UserSecretsClient().get_secret("GH_TOKEN")
+except Exception:
+    pass
+url = f"https://{{TOKEN + '@' if TOKEN else ''}}github.com/{{REPO}}.git"
+hide = (lambda s: s.replace(TOKEN, "***")) if TOKEN else (lambda s: s)
+
+os.chdir(WORK)
+cmd = (["git", "-C", "repo", "pull", "--ff-only"] if os.path.isdir("repo/.git")
+       else ["git", "clone", "--depth", "1", "-b", BRANCH, url, "repo"])
+r = subprocess.run(cmd, capture_output=True, text=True)
+print(hide((r.stdout + r.stderr).strip()))
+if r.returncode:
+    raise SystemExit("git that bai -- kiem tra Internet = On, repo Public")
+
+os.chdir(f"{{WORK}}/repo"); sys.path.insert(0, os.getcwd())
+print(subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())''')
+
+code('''!pip -q install ftfy sentencepiece
+!nvidia-smi --query-gpu=name,memory.total --format=csv,noheader''')
+
+md("""## 1) Kho văn bản
+
+Gom **mọi** file có Kanglish, khử trùng lặp. Không cần nhãn nào.
+
+> **Lát held-out bị loại khỏi kho, mặc định.** Văn bản đó không mang nhãn nên giữ lại cũng không
+> rò rỉ nhãn — nhưng model sẽ đã đọc đúng những câu ấy, và mọi macro-F1 đo trên lát đó sau này
+> sẽ **lạc quan một cách âm thầm**. Giữ trung thực chỉ tốn 919 dòng trên 13.995.
+>
+> Ngược lại, `*_validation_inputs.csv` và file test **được** đưa vào: đó là transductive learning
+> thông thường, và đúng là tình huống bản nộp sẽ chạy. Nhớ khai báo điều này trong bài báo.""")
+code('''from pretrain_mlm import build_corpus
+from src.utils.config import load_config
+from src.data.preprocessing import ensure_processed
+
+cfg = load_config("configs/base.yaml", task="a")
+ensure_processed(cfg)
+corpus = build_corpus(cfg, include_eval=False)
+print(f"\n-> {len(corpus):,} dong")
+for t in corpus[:5]:
+    print("   ", t[:80])''')
+
+md("""## 2) Chạy MLM
+
+`--epochs 15` trên ~13k dòng là khoảng 20–25 phút trên T4. Theo dõi **perplexity**: nó bắt đầu
+cao vì các mảnh từ vựng đang sai với văn bản này, và **giảm xuống chính là sự thích nghi** mà
+script này tồn tại để làm. Nếu nó không giảm, có gì đó sai.""")
+code('''!python pretrain_mlm.py --model google/muril-base-cased --epochs 15
+# Bien the:
+# !python pretrain_mlm.py --model Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL --epochs 15
+# !python pretrain_mlm.py --model xlm-roberta-base --epochs 15
+# !python pretrain_mlm.py --epochs 20 --lr 1e-4        # kho nho -> co the can lr cao hon
+# !python pretrain_mlm.py --include_eval               # CHI cho ban nop cuoi, diem noi bo se lac quan''')
+
+md("""## 3) Fine-tune từ checkpoint vừa thích nghi
+
+Không cần code mới — chỉ trỏ `model.name` vào thư mục vừa lưu. Chạy **cả bản gốc lẫn bản MLM**
+thì mới biết nó có giúp không.""")
+code('''CKPT = 'checkpoints/mlm/muril-base-cased'
+for t in ('a', 'b'):
+    print("=" * 70)
+    !python train.py --config configs/muril.yaml --task {t}                         # moc so sanh
+    !python train.py --config configs/muril.yaml --task {t} --set model.name={CKPT} --run_suffix _mlm''')
+
+code('''import pandas as pd
+d = pd.read_csv('results/metrics.csv')
+display(d[d.run.str.contains('muril')][['task', 'run', 'macro_f1', 'accuracy', 'best_epoch']]
+        .sort_values(['task', 'macro_f1'], ascending=[True, False]))''')
+
+md("""## 4) Tải checkpoint về
+
+**~0,9 GB** — chỉ tải nếu bạn muốn dùng lại ở máy hoặc ở session Kaggle khác. Nếu không, cứ chạy
+lại notebook này (25 phút) thì nhanh hơn là tải lên tải xuống.""")
+code('''!cd /kaggle/working/repo && zip -r -q /kaggle/working/mlm_muril.zip checkpoints/mlm
+!ls -lh /kaggle/working/mlm_muril.zip''')
+
+write("pretrain_mlm.ipynb")
