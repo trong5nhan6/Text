@@ -775,7 +775,7 @@ from src.data.preprocessing import ensure_processed
 cfg = load_config("configs/base.yaml", task="a")
 ensure_processed(cfg)
 corpus = build_corpus(cfg, include_eval=False)
-print(f"\n-> {len(corpus):,} dong")
+print(f"-> {len(corpus):,} dong")
 for t in corpus[:5]:
     print("   ", t[:80])''')
 
@@ -784,16 +784,21 @@ md("""## 2) Chạy MLM
 `--epochs 15` trên ~13k dòng là khoảng 20–25 phút trên T4. Theo dõi **perplexity**: nó bắt đầu
 cao vì các mảnh từ vựng đang sai với văn bản này, và **giảm xuống chính là sự thích nghi** mà
 script này tồn tại để làm. Nếu nó không giảm, có gì đó sai.""")
-code('''!python pretrain_mlm.py --model google/muril-base-cased --epochs 15
+code('''MODEL      = 'google/muril-base-cased'
+EPOCHS     = 15
+BATCH      = 8      # giam xuong 4 neu OOM; xem bang ben duoi
+GRAD_ACCUM = 4      # BATCH x GRAD_ACCUM = batch hieu dung (8 x 4 = 32)
+MAX_LEN    = 128    # do dai theo TOKEN; giam con 96 cung tiet kiem nhieu VRAM
+
+!python pretrain_mlm.py --model {MODEL} --epochs {EPOCHS} --batch_size {BATCH} --grad_accum {GRAD_ACCUM} --max_len {MAX_LEN}
+
 # Bien the:
 # !python pretrain_mlm.py --model Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL --epochs 15
 # !python pretrain_mlm.py --model xlm-roberta-base --epochs 15
 # !python pretrain_mlm.py --epochs 20 --lr 1e-4        # kho nho -> co the can lr cao hon
 # !python pretrain_mlm.py --include_eval               # CHI cho ban nop cuoi, diem noi bo se lac quan
 #
-# NEU OOM: giam --batch_size (va tang --grad_accum de giu batch hieu dung):
-# !python pretrain_mlm.py --batch_size 4 --grad_accum 8 --epochs 15
-# !python pretrain_mlm.py --batch_size 8 --grad_accum 4 --max_len 96 --epochs 15''')
+# NEU OOM: dat BATCH = 4 va GRAD_ACCUM = 8 o tren (batch hieu dung van 32).''')
 
 md("""> **Về OOM.** Logits của MLM có shape `[batch, len, vocab]`, mà vocab của MuRIL là
 > **197.285** — nên riêng một tensor đó ở `batch 32 × len 128` đã chiếm **3,2 GB**, và phải giữ
