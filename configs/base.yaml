@@ -49,6 +49,18 @@ model:
   # Size check before turning these on: the linear head is 4,614 params, a 4-expert MoE with
   # expert_dim 64 is ~201k, fitted on 2.8k-5.7k rows by a model that already reaches train-F1
   # 0.99. More head capacity is not what the held-out gap is short of.
+  # Which hidden states the head reads. forward() uses only the last one by default, but a
+  # frozen-feature probe on MuRIL says the shallow layers carry more: on task b a linear probe
+  # scores 0.4208 on layer 12, 0.4582 on layer 2, and 0.4791 on the two concatenated. On task a
+  # layer 2 alone wins (0.7507 vs 0.7350) while concatenating loses, so this is task-dependent.
+  #   null      only last_hidden_state -- unchanged behaviour, no extra parameters
+  #   [2, 12]   concatenate these hidden states; the head input doubles to 1536
+  #   mix       one learned softmax weight per hidden state, summed. Width stays 768 and it
+  #             costs 13 parameters; model.layer_mix() reports what it learned.
+  # Indices run 0 (embedding output, no block applied) .. num_hidden_layers (= last_hidden_state).
+  # Careful with a single shallow layer: layers: [2] leaves blocks 3-12 with no path to the loss,
+  # so they get no gradient and the model is a 2-block transformer paying for 12.
+  layers: null
   head: linear              # linear | sparse_moe | soft_moe
   moe_experts: 4            # both MoE heads
   moe_expert_dim: 64        # hidden width of one expert MLP; 64 -> ~201k, 256 -> ~797k
@@ -66,6 +78,10 @@ training:
   grad_accum: 1
   lr: 2.0e-5
   head_lr: 1.0e-4           # classifier head is trained from scratch
+  layer_mix_lr: 1.0e-3      # only model.layers=mix: learning rate of the 13 softmax logits.
+                            # Much larger than head_lr on purpose -- AdamW steps a parameter by
+                            # about its lr regardless of gradient size, so at 1e-4 the mix is
+                            # still uniform to four decimals after a full epoch.
   llrd: null                # layer-wise LR decay. null = one flat lr for the whole backbone.
                             # 0.9 = each block gets 0.9x the LR of the block above it, so the
                             # last block trains at `lr` and block 0 at lr*0.9**12. Keeps the

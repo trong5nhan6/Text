@@ -33,7 +33,7 @@ def build_model(cfg, num_labels: int):
     return TransformerClassifier(m["name"], num_labels, m.get("pooling", "cls"), m.get("dropout", 0.1),
                                  unfreeze_last_n_blocks=m.get("unfreeze_last_n_blocks"),
                                  freeze_embeddings=m.get("freeze_embeddings"),
-                                 head_cfg=head_config(m))
+                                 head_cfg=head_config(m), layers=m.get("layers"))
 
 
 def load_from_checkpoint(ckpt_dir):

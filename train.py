@@ -109,9 +109,22 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
         return sum(trainer.predict(df[c]) for c in infer_cols) / len(infer_cols)
 
     single = infer_cols == [train_col]
+    mix = model.layer_mix()          # None unless model.layers == "mix"
+    if mix is not None:
+        spread = max(mix) - min(mix)
+        log.info("layer_mix: " + " ".join(f"{i}:{w:.3f}" for i, w in enumerate(mix))
+                 + f"  (phan hoa {spread:.4f}, deu = {1 / len(mix):.4f})")
+        if spread < 0.01:
+            # AdamW steps a parameter by about its lr, so too small a rate leaves the 13 logits
+            # where they started and "mix" quietly becomes a plain average over all layers. That
+            # failure is invisible in the score, so say it out loud.
+            log.info(f"!! trong so mix gan nhu KHONG doi -> mix dang chi la trung binh deu. "
+                     f"Tang training.layer_mix_lr (dang {cfg['training'].get('layer_mix_lr')}) "
+                     f"len 5e-3 hoac train nhieu step hon.")
     out = {"eval": best["pred"] if single else predict(ev),
            "val": predict(val), "test": None if test is None else predict(test),
-           "extra": {"model": cfg["model"]["name"], "loss": loss_name, "best_epoch": best["epoch"]}}
+           "extra": {"model": cfg["model"]["name"], "loss": loss_name, "best_epoch": best["epoch"],
+                     **({"layer_mix": mix} if mix is not None else {})}}
     json.dump(best["history"], open(run_dir / "history.json", "w"), indent=1)
     if cfg["checkpoint"]["save"] == "best":
         ck = Path(cfg["paths"]["checkpoint_dir"]) / cfg["task"] / run_dir.name

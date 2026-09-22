@@ -29,12 +29,31 @@ def block_layout(backbone):
     return prefix, max(idx) + 1
 
 
+def _check_layers(layers, n_hs: int, backbone_name: str):
+    """null | "mix" | a list of hidden-state indices. Validated here so a typo fails at build
+    time with the valid range, instead of as an IndexError mid-epoch."""
+    if layers is None or layers == "mix":
+        return layers
+    if isinstance(layers, int):
+        layers = [layers]
+    if not isinstance(layers, (list, tuple)) or not layers:
+        raise ValueError(f"model.layers must be null, \"mix\", or a non-empty list of indices; "
+                         f"got {layers!r}")
+    layers = [int(i) + n_hs if int(i) < 0 else int(i) for i in layers]
+    bad = [i for i in layers if not 0 <= i < n_hs]
+    if bad:
+        raise ValueError(f"model.layers {bad} out of range for {backbone_name}: it has {n_hs} "
+                         f"hidden states (0 = embeddings .. {n_hs - 1} = last_hidden_state)")
+    return list(layers)
+
+
 class TransformerClassifier(nn.Module):
     """Pretrained encoder + pooling + dropout + linear head."""
 
     def __init__(self, backbone_name: str, num_labels: int, pooling: str = "cls",
                  dropout: float = 0.1, backbone_config=None,
-                 unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None):
+                 unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
+                 layers=None):
         super().__init__()
         if backbone_config is None:                      # training: load pretrained weights
             # .float() is not redundant: some published checkpoints store fp16 weights
@@ -47,15 +66,49 @@ class TransformerClassifier(nn.Module):
             # backbone builds an fp16 one, and load_state_dict copies in place, so fp16 would stick.
             self.backbone = AutoModel.from_config(backbone_config).float()
         head_cfg = dict(head_cfg or {"head": "linear"})
+        hidden = self.backbone.config.hidden_size
+        n_hs = self._n_hidden_states()
+        self.layers = _check_layers(layers, n_hs, backbone_name)
+        # A list of layers widens the head; "mix" sums them, so the width is unchanged.
+        width = hidden * (len(self.layers) if isinstance(self.layers, list) else 1)
+        if self.layers == "mix":
+            # One logit per hidden state, softmaxed at use. 13 parameters on a base model.
+            # Zeros -> a uniform mix at initialisation, so training starts from the average.
+            self.layer_weights = nn.Parameter(torch.zeros(n_hs))
         self.meta = {"backbone_name": backbone_name, "num_labels": num_labels,
-                     "pooling": pooling, "dropout": dropout, "head_cfg": head_cfg}
+                     "pooling": pooling, "dropout": dropout, "head_cfg": head_cfg,
+                     "layers": self.layers}
         self.pooling = pooling
         self.dropout = nn.Dropout(dropout)
         # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
         # excludes it from the LLRD ladder by that prefix, and both must keep holding.
-        self.head = build_head(head_cfg.get("head"), self.backbone.config.hidden_size,
-                               num_labels, head_cfg)
+        self.head = build_head(head_cfg.get("head"), width, num_labels, head_cfg)
         self.freeze_summary = self._apply_freezing(unfreeze_last_n_blocks, freeze_embeddings)
+
+    def _n_hidden_states(self) -> int:
+        """hidden_states has one entry per block plus one for the embedding output, so a 12-block
+        model yields 13 and index 12 is exactly last_hidden_state."""
+        return getattr(self.backbone.config, "num_hidden_layers", 0) + 1
+
+    def _combine(self, hidden_states):
+        """Fold the requested hidden states into one [B, T, width] tensor.
+
+        Done at token level rather than after pooling, which is the same thing -- concatenation
+        and both pooling modes are linear in the token axis, so they commute -- but it keeps one
+        code path for the pooled heads and for soft_moe, which needs the sequence.
+        """
+        if self.layers == "mix":
+            h0 = hidden_states[0]
+            w = self.layer_weights.float().softmax(0).to(h0.dtype)
+            return sum(w[i] * h for i, h in enumerate(hidden_states))
+        return torch.cat([hidden_states[i] for i in self.layers], dim=-1)
+
+    def layer_mix(self):
+        """-> the learned per-layer weights, for reporting. None unless layers == "mix"."""
+        if self.layers != "mix":
+            return None
+        with torch.no_grad():
+            return [round(float(x), 4) for x in self.layer_weights.float().softmax(0)]
 
     def _apply_freezing(self, unfreeze_last_n, freeze_emb) -> str:
         """Freeze everything below the last `unfreeze_last_n` blocks. The head and the modules
@@ -114,7 +167,12 @@ class TransformerClassifier(nn.Module):
         kw = {"input_ids": input_ids, "attention_mask": attention_mask}
         if token_type_ids is not None:
             kw["token_type_ids"] = token_type_ids
-        h = self.backbone(**kw).last_hidden_state
+        if self.layers is None:
+            h = self.backbone(**kw).last_hidden_state
+        else:
+            # The intermediate states are computed on the way through regardless; without this
+            # flag transformers simply drops them.
+            h = self._combine(self.backbone(**kw, output_hidden_states=True).hidden_states)
         # soft_moe aggregates the token axis itself, so it takes the sequence and `pooling` is
         # unused. Every other head takes the pooled vector, with dropout applied here so that
         # `linear` stays exactly what it was.
@@ -133,7 +191,7 @@ class TransformerClassifier(nn.Module):
         trainer can add unconditionally."""
         return getattr(self.head, "aux_loss", 0.0)
 
-    def param_groups(self, lr, head_lr, weight_decay, llrd=None):
+    def param_groups(self, lr, head_lr, weight_decay, llrd=None, mix_lr=None):
         """Optimizer groups. Two schemes, chosen by `training.llrd`:
 
         llrd=None -- one flat `lr` for the whole backbone (plus `head_lr` for the head).
@@ -176,7 +234,16 @@ class TransformerClassifier(nn.Module):
             if not p.requires_grad:
                 continue
             wd = 0.0 if any(nd in n for nd in no_decay) else weight_decay
-            if n.startswith("head."):
+            if n == "layer_weights":
+                # These 13 softmax logits need a much larger step than anything else. AdamW moves
+                # a parameter by roughly its lr per step whatever the gradient size, so at
+                # head_lr 1e-4 the logits drift ~1e-4/step and the mix is still uniform to four
+                # decimals after an epoch -- "mix" would silently degrade into a plain average of
+                # all layers. mix_lr is a separate, much larger rate. No weight decay: decaying a
+                # softmax logit only pulls the mix back toward uniform, which is not a prior
+                # worth imposing.
+                key, p_lr, wd = ("mix", 0.0), mix_lr or head_lr or lr, 0.0
+            elif n.startswith("head."):
                 key, p_lr = ("head", wd), head_lr or lr
             elif llrd:
                 d = depth(n)
@@ -204,7 +271,8 @@ class TransformerClassifier(nn.Module):
         bcfg = AutoConfig.from_pretrained(ckpt_dir / "backbone")
         # .get: checkpoints written before model.head existed carry no head_cfg and are linear.
         model = cls(meta["backbone_name"], meta["num_labels"], meta["pooling"], meta["dropout"],
-                    backbone_config=bcfg, head_cfg=meta.get("head_cfg"))
+                    backbone_config=bcfg, head_cfg=meta.get("head_cfg"),
+                    layers=meta.get("layers"))
         sd = torch.load(ckpt_dir / "model.pt", map_location=map_location)
         model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in sd.items()})
         return model, meta

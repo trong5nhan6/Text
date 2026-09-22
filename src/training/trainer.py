@@ -46,7 +46,8 @@ class Trainer:
         dl_tr = make_loader(train_df.text.tolist(), train_df.y.tolist(), self.tok, self.cfg, train=True)
         dl_va = make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False)
 
-        pg = self.model.param_groups(t["lr"], t.get("head_lr"), t["weight_decay"], t.get("llrd"))
+        pg = self.model.param_groups(t["lr"], t.get("head_lr"), t["weight_decay"], t.get("llrd"),
+                                     t.get("layer_mix_lr"))
         opt = torch.optim.AdamW(pg)
         if t.get("llrd"):
             back = [g["lr"] for g in pg if g["lr"] != (t.get("head_lr") or t["lr"])] or [t["lr"]]
