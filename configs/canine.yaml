@@ -22,7 +22,9 @@ model:
   # CANINE counts CHARACTERS, not tokens. Measured on task a: p50 51, p95 212, p99 380 chars,
   # so 256 truncates 3.1% of rows against 13.5% at 128. It costs less than it looks: CANINE
   # downsamples 4x before its 12 deep blocks, so max_len 256 puts 64 positions through them --
-  # fewer than MuRIL's 96 tokens.
+  # fewer than MuRIL's 96 tokens. Timed on CPU, 64 rows for one epoch: CANINE at max_len 256
+  # took 20s against MuRIL's 37s at max_len 96, so it is the cheaper model despite the
+  # longer inputs (132M parameters against 238M helps too).
   # model.layers must stay null here. CANINE returns 17 hidden states at two different
   # resolutions (character-length and 4x-downsampled), so they cannot be summed or concatenated;
   # classifier.py raises a clear error rather than broadcasting nonsense.
