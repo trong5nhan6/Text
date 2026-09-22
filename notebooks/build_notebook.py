@@ -328,7 +328,7 @@ md("""> **Loss:** vòng lặp trên đã dùng đúng loss cho từng task qua `
 code('''# Ví dụ biến thể:
 # !python train.py --config configs/muril.yaml --task b --set training.focal_gamma=3 --run_suffix _g3
 # !python train.py --config configs/muril.yaml --task b --set data.max_len=128 --run_name muril_len128
-# !python train.py --config configs/muril.yaml --task b --set data.text_type=both --set data.tta=true
+# !python train.py --config configs/muril.yaml --task b --set data.text_type=both data.tta=true
 # !python train.py --config configs/roberta.yaml --task b --run_name xlmr_large --set model.name=xlm-roberta-large training.lr=1e-5 training.batch_size=16 training.grad_accum=2''')
 
 code('''!du -sh checkpoints/*/* 2>/dev/null; df -h /kaggle/working | tail -1
@@ -786,12 +786,12 @@ md("""## 2) Chạy MLM
 cao vì các mảnh từ vựng đang sai với văn bản này, và **giảm xuống chính là sự thích nghi** mà
 script này tồn tại để làm. Nếu nó không giảm, có gì đó sai.""")
 code('''MODEL      = 'google/muril-base-cased'
-EPOCHS     = 15
+MLM_EPOCHS = 15     # so epoch cua MLM. Fine-tune co so epoch RIENG, o muc 3.
 BATCH      = 32     # TONG, chia deu cho cac GPU (2 x T4 -> 16/GPU). Giam neu OOM.
 GRAD_ACCUM = 1      # BATCH x GRAD_ACCUM = batch hieu dung (32 x 1 = 32)
 MAX_LEN    = 128    # do dai theo TOKEN; giam con 96 cung tiet kiem nhieu VRAM
 
-!python pretrain_mlm.py --model {MODEL} --epochs {EPOCHS} --batch_size {BATCH} --grad_accum {GRAD_ACCUM} --max_len {MAX_LEN}
+!python pretrain_mlm.py --model {MODEL} --epochs {MLM_EPOCHS} --batch_size {BATCH} --grad_accum {GRAD_ACCUM} --max_len {MAX_LEN}
 
 # Bien the:
 # !python pretrain_mlm.py --model Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL --epochs 15
@@ -838,11 +838,18 @@ md("""## 3) Fine-tune từ checkpoint vừa thích nghi
 
 Không cần code mới — chỉ trỏ `model.name` vào thư mục vừa lưu. Chạy **cả bản gốc lẫn bản MLM**
 thì mới biết nó có giúp không.""")
-code('''CKPT = 'checkpoints/mlm/muril-base-cased'
+code('''CKPT      = 'checkpoints/mlm/muril-base-cased'
+FT_EPOCHS = 6     # so epoch khi FINE-TUNE -- KHAC voi MLM_EPOCHS o tren (cai do la cua MLM).
+                  # base.yaml dang de 20; doi gia tri thi BAT BUOC co suffix, nen no nam trong SUF.
+SUF       = f'_e{FT_EPOCHS}'
+# patience = epochs tuc TAT early stopping: trainer van giu epoch tot nhat, con lich LR duoc
+# anneal het. Voi epochs=20 thi model dat dinh o epoch ~5 luc LR con ~83% -- phi doan anneal.
+FT = f'--set training.epochs={FT_EPOCHS} training.early_stopping_patience={FT_EPOCHS}'
+
 for t in ('a', 'b'):
     print("=" * 70)
-    !python train.py --config configs/muril.yaml --task {t}                         # moc so sanh
-    !python train.py --config configs/muril.yaml --task {t} --set model.name={CKPT} --run_suffix _mlm''')
+    !python train.py --config configs/muril.yaml --task {t} {FT} --run_suffix {SUF}
+    !python train.py --config configs/muril.yaml --task {t} {FT} model.name={CKPT} --run_suffix {SUF}_mlm''')
 
 code('''import pandas as pd
 d = pd.read_csv('results/metrics.csv')

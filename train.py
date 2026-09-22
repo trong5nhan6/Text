@@ -41,7 +41,9 @@ def parse():
     ap.add_argument("--seed", type=int)
     ap.add_argument("--run_name")
     ap.add_argument("--run_suffix", help="appended to the default run name, e.g. _e6")
-    ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE")
+    # action="extend": a second --set must add to the first, not replace it. With plain nargs="*"
+    # `--set a=1 --set b=2` silently keeps only b=2, and the first override vanishes without a word.
+    ap.add_argument("--set", nargs="*", action="extend", default=[], metavar="KEY=VALUE")
     ap.add_argument("--overwrite", action="store_true", help="delete previous results of this run")
     return ap.parse_args()
 
