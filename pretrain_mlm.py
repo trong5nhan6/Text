@@ -135,6 +135,9 @@ def parse():
     ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--config", default="configs/base.yaml")
+    ap.add_argument("--max_rows", type=int, default=0,
+                    help="keep only the first N corpus rows. For smoke-testing the whole script, "
+                         "save included, without waiting for a real run.")
     ap.add_argument("--include_eval", action="store_true",
                     help="also pretrain on the held-out slice. Every macro-F1 measured on that "
                          "slice afterwards becomes optimistic; only do this for a final model.")
@@ -147,15 +150,18 @@ def main():
                               DataCollatorForLanguageModeling, get_linear_schedule_with_warmup)
     from src.training.trainer import resolve_precision
 
-    out = Path(a.out or f"checkpoints/mlm/{a.model.rstrip('/').split('/')[-1]}")
-    log = get_logger("mlm", Path("logs") / f"mlm_{out.name}.log")
-    log.info(f"===== MLM | model {a.model} -> {out} =====")
+    out_dir = Path(a.out or f"checkpoints/mlm/{a.model.rstrip('/').split('/')[-1]}")
+    log = get_logger("mlm", Path("logs") / f"mlm_{out_dir.name}.log")
+    log.info(f"===== MLM | model {a.model} -> {out_dir} =====")
 
     cfg = load_config(a.config, task="a")
     ensure_processed(cfg, log.info)
     corpus = build_corpus(cfg, a.include_eval, log.info)
     if not corpus:
         raise SystemExit("kho van ban rong -- kiem tra data/raw")
+    if a.max_rows:
+        corpus = corpus[:a.max_rows]
+        log.info(f"--max_rows {a.max_rows}: cat kho con {len(corpus)} dong (chi de smoke-test)")
 
     set_seed(a.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -220,8 +226,10 @@ def main():
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with torch.autocast(device_type=device.type, dtype=amp or torch.float32,
                                 enabled=amp is not None):
-                out = net(**batch)
-                loss = out.mean() if use_dp else out.loss   # DataParallel -> one loss per replica
+                # `fwd`, not `out`: `out_dir` used to be called `out`, and this line shadowed it
+                # so the run trained for its full schedule and then died on out.mkdir().
+                fwd = net(**batch)
+                loss = fwd.mean() if use_dp else fwd.loss   # DataParallel -> one loss per replica
             total += loss.item()
             scaler.scale(loss / a.grad_accum).backward()
             if (i + 1) % a.grad_accum == 0 or i + 1 == len(dl):
@@ -241,7 +249,7 @@ def main():
         log.info(f"ep {ep}/{a.epochs} loss {mean:.4f} ppl {torch.tensor(mean).exp():.2f} "
                  f"({time.time() - t0:.0f}s)")
 
-    out.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     # save_pretrained, not torch.save: the point is for train.py to load this with
     # --set model.name=<out>, which goes through AutoModel.from_pretrained.
     #
@@ -251,11 +259,11 @@ def main():
     #   "pooler.dense.* MISSING" on the next load -- an MLM head has no pooler, so the checkpoint
     #       carries none and AutoModel makes a fresh one. It never trains (_apply_freezing freezes
     #       pooler.*) and never reaches the output (forward reads last_hidden_state).
-    model.save_pretrained(out)
-    tok.save_pretrained(out)
-    log.info(f"da luu -> {out}")
+    model.save_pretrained(out_dir)
+    tok.save_pretrained(out_dir)
+    log.info(f"da luu -> {out_dir}")
     log.info(f"dung: python train.py --config configs/muril.yaml --task b "
-             f"--set model.name={out} --run_suffix _mlm")
+             f"--set model.name={out_dir} --run_suffix _mlm")
 
 
 if __name__ == "__main__":

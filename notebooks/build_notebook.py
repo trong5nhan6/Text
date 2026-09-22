@@ -800,7 +800,10 @@ MAX_LEN    = 128    # do dai theo TOKEN; giam con 96 cung tiet kiem nhieu VRAM
 # !python pretrain_mlm.py --include_eval               # CHI cho ban nop cuoi, diem noi bo se lac quan
 #
 # NEU OOM: ha BATCH va tang GRAD_ACCUM de giu batch hieu dung (vd 16 x 2, hoac 8 x 4).
-# CHI dung 1 GPU du co 2:  them --single_gpu''')
+# CHI dung 1 GPU du co 2:  them --single_gpu
+#
+# THU NHANH truoc khi bo 25 phut GPU -- chay het ca phan luu trong ~1 phut:
+# !python pretrain_mlm.py --max_rows 200 --epochs 1 --out /tmp/mlm_test''')
 
 md("""> **Về OOM.** Logits của MLM có shape `[batch, len, vocab]`, mà vocab của MuRIL là
 > **197.285** — nên riêng một tensor đó ở `batch 32 × len 128` đã chiếm **3,2 GB**, và phải giữ
