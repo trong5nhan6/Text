@@ -786,8 +786,8 @@ cao vì các mảnh từ vựng đang sai với văn bản này, và **giảm xu
 script này tồn tại để làm. Nếu nó không giảm, có gì đó sai.""")
 code('''MODEL      = 'google/muril-base-cased'
 EPOCHS     = 15
-BATCH      = 8      # giam xuong 4 neu OOM; xem bang ben duoi
-GRAD_ACCUM = 4      # BATCH x GRAD_ACCUM = batch hieu dung (8 x 4 = 32)
+BATCH      = 32     # TONG, chia deu cho cac GPU (2 x T4 -> 16/GPU). Giam neu OOM.
+GRAD_ACCUM = 1      # BATCH x GRAD_ACCUM = batch hieu dung (32 x 1 = 32)
 MAX_LEN    = 128    # do dai theo TOKEN; giam con 96 cung tiet kiem nhieu VRAM
 
 !python pretrain_mlm.py --model {MODEL} --epochs {EPOCHS} --batch_size {BATCH} --grad_accum {GRAD_ACCUM} --max_len {MAX_LEN}
@@ -798,7 +798,8 @@ MAX_LEN    = 128    # do dai theo TOKEN; giam con 96 cung tiet kiem nhieu VRAM
 # !python pretrain_mlm.py --epochs 20 --lr 1e-4        # kho nho -> co the can lr cao hon
 # !python pretrain_mlm.py --include_eval               # CHI cho ban nop cuoi, diem noi bo se lac quan
 #
-# NEU OOM: dat BATCH = 4 va GRAD_ACCUM = 8 o tren (batch hieu dung van 32).''')
+# NEU OOM: ha BATCH va tang GRAD_ACCUM de giu batch hieu dung (vd 16 x 2, hoac 8 x 4).
+# CHI dung 1 GPU du co 2:  them --single_gpu''')
 
 md("""> **Về OOM.** Logits của MLM có shape `[batch, len, vocab]`, mà vocab của MuRIL là
 > **197.285** — nên riêng một tensor đó ở `batch 32 × len 128` đã chiếm **3,2 GB**, và phải giữ
@@ -811,8 +812,23 @@ md("""> **Về OOM.** Logits của MLM có shape `[batch, len, vocab]`, mà voca
 > | **8 × 128** | **1,62 GB** | 3,81 GB | **~6,6 GB** ✅ mặc định |
 > | 4 × 128 | 0,81 GB | 3,81 GB | ~5,8 GB |
 >
-> Mặc định là `--batch_size 8 --grad_accum 4`, tức batch hiệu dụng vẫn 32. Script in ước lượng
-> VRAM **trước khi** train, nên bạn biết trước chứ không phải đợi nó crash.""")
+> **Trên 2×T4 script tự dùng cả hai GPU** (`DataParallel`), nên `BATCH` là **tổng** và mỗi GPU
+> chỉ giữ một nửa:
+>
+> | BATCH tổng | /GPU | logits/GPU | **GPU 0** | GPU 1 |
+> |---|---|---|---|---|
+> | 16 | 8 | 1,62 GB | 6,4 GB | 3,6 GB |
+> | **32** | **16** | **3,23 GB** | **8,0 GB** | 5,2 GB |
+> | 48 | 24 | 4,85 GB | 9,7 GB | 6,8 GB |
+> | 64 | 32 | 6,46 GB | 11,3 GB | 8,4 GB |
+>
+> GPU 0 luôn chật hơn vì chỉ nó giữ trọng số gốc, gradient và hai trạng thái AdamW (3,8 GB);
+> GPU kia chỉ giữ một bản sao trọng số.
+>
+> **Chạy trên máy 1 GPU vẫn bình thường** — script tự dò `torch.cuda.device_count()` và chỉ bật
+> `DataParallel` khi thấy nhiều hơn một. Checkpoint lưu ra giống hệt nhau trong cả hai trường hợp.
+>
+> Script in ước lượng VRAM **trước khi** train, nên bạn biết trước chứ không phải đợi nó crash.""")
 
 md("""## 3) Fine-tune từ checkpoint vừa thích nghi
 

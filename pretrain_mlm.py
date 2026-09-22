@@ -85,6 +85,25 @@ def build_corpus(cfg, include_eval: bool, log=print):
     return corpus
 
 
+class LossOnly(torch.nn.Module):
+    """Return the loss and nothing else, for DataParallel.
+
+    DataParallel gathers every tensor a forward returns onto the first device. An MLM forward
+    returns the loss *and* the [batch, len, vocab] logits, and with MuRIL's 197,285-entry
+    vocabulary those logits are the whole memory problem -- gathering them would pile every
+    replica's copy onto GPU 0 and undo the point of splitting the batch. Returning the loss alone
+    leaves the logits on the device that produced them.
+    """
+
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, **batch):
+        # 1-D, not scalar: DataParallel concatenates replica outputs along dim 0.
+        return self.inner(**batch).loss.unsqueeze(0)
+
+
 class Encoded(Dataset):
     def __init__(self, texts, tok, max_len):
         self.enc = tok(texts, truncation=True, max_length=max_len)
@@ -106,6 +125,9 @@ def parse():
                          "vocab is 197,285, so batch 32 at len 128 needs 3.2 GB for one such "
                          "tensor and OOMs a T4. Raise the effective batch with --grad_accum.")
     ap.add_argument("--grad_accum", type=int, default=4)
+    ap.add_argument("--single_gpu", action="store_true",
+                    help="use one GPU even when several are visible. Otherwise every visible GPU "
+                         "is used, and --batch_size is the TOTAL split across them.")
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--max_len", type=int, default=128)
     ap.add_argument("--mlm_probability", type=float, default=0.15)
@@ -140,6 +162,14 @@ def main():
     tok = AutoTokenizer.from_pretrained(a.model)
     model = AutoModelForMaskedLM.from_pretrained(a.model).float().to(device)
     amp = resolve_precision("auto", device)
+    n_gpu = torch.cuda.device_count() if device.type == "cuda" else 0
+    use_dp = n_gpu > 1 and not a.single_gpu
+    # `model` stays the real module throughout: the optimizer and save_pretrained both need it,
+    # and DataParallel only wraps it for the forward pass.
+    net = torch.nn.DataParallel(LossOnly(model)) if use_dp else model
+    if use_dp:
+        log.info(f"DataParallel tren {n_gpu} GPU -- batch {a.batch_size} chia thanh "
+                 f"{a.batch_size // n_gpu}/GPU, nen VRAM moi GPU giam tuong ung")
 
     ds = Encoded(corpus, tok, a.max_len)
     n_tok = sum(len(x) for x in ds.enc["input_ids"])
@@ -155,15 +185,22 @@ def main():
     # Print the estimate before training rather than after the crash.
     n_par = sum(p.numel() for p in model.parameters())
     vocab = model.config.vocab_size
-    gb_logits = 2 * a.batch_size * a.max_len * vocab * 4 / 1e9
+    per_gpu = a.batch_size / max(n_gpu, 1) if use_dp else a.batch_size
+    gb_logits = 2 * per_gpu * a.max_len * vocab * 4 / 1e9
     gb_model = n_par * 16 / 1e9          # weights + grads + AdamW's two states, fp32
-    log.info(f"uoc luong VRAM: logits {gb_logits:.2f} GB (batch x len x vocab {vocab:,}) "
-             f"+ model/AdamW {gb_model:.2f} GB + kich hoat ~1 GB = ~{gb_logits + gb_model + 1:.1f} GB")
+    # Under DataParallel only GPU 0 carries the master weights, the gradients and AdamW's two
+    # states; the others hold a weight replica alone. So GPU 0 is the one that runs out first.
+    gb_gpu0 = gb_logits + gb_model + 1
+    log.info(f"uoc luong VRAM: logits {gb_logits:.2f} GB/GPU "
+             f"({per_gpu:g} dong x {a.max_len} len x vocab {vocab:,})"
+             + (f" | GPU0 + model/grad/AdamW {gb_model:.2f} GB -> ~{gb_gpu0:.1f} GB, "
+                f"GPU khac ~{gb_logits + gb_model / 4 + 1:.1f} GB" if use_dp else
+                f" + model/AdamW {gb_model:.2f} GB + kich hoat ~1 GB = ~{gb_gpu0:.1f} GB"))
     if torch.cuda.is_available():
         total = torch.cuda.get_device_properties(0).total_memory / 1e9
-        log.info(f"  GPU co {total:.1f} GB"
+        log.info(f"  moi GPU co {total:.1f} GB"
                  + ("  -- CHAT, giam --batch_size hoac --max_len neu OOM"
-                    if gb_logits + gb_model + 1 > 0.75 * total else ""))
+                    if gb_gpu0 > 0.75 * total else ""))
 
     decay = [p for n, p in model.named_parameters()
              if p.requires_grad and not any(k in n for k in ("bias", "LayerNorm.weight"))]
@@ -183,7 +220,8 @@ def main():
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with torch.autocast(device_type=device.type, dtype=amp or torch.float32,
                                 enabled=amp is not None):
-                loss = model(**batch).loss
+                out = net(**batch)
+                loss = out.mean() if use_dp else out.loss   # DataParallel -> one loss per replica
             total += loss.item()
             scaler.scale(loss / a.grad_accum).backward()
             if (i + 1) % a.grad_accum == 0 or i + 1 == len(dl):
