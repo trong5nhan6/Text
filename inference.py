@@ -87,14 +87,27 @@ def main():
             if not f.exists():
                 raise SystemExit(f"{f} missing (run trained before the {a.split} file existed?) -> use mode 2")
             probs.append(np.load(f)); names.append(r)
-            e = np.load(res / a.task / r / "eval.npy")
-            print(f"  {r:35s} held-out {compute_metrics(y, e.argmax(1))}")
+            # A run trained with data.use_valdataset=false has no eval.npy, by design: it kept no
+            # labelled rows to be scored on. It can still be blended here -- its val/test
+            # probabilities are ordinary -- but the weights must come from somewhere else, and
+            # there is no held-out number to print for it.
+            ef = res / a.task / r / "eval.npy"
+            if ef.exists():
+                print(f"  {r:35s} held-out {compute_metrics(y, np.load(ef).argmax(1))}")
+            else:
+                print(f"  {r:35s} khong co eval.npy (use_valdataset=false) -> khong cham duoc")
         split_name = a.split
 
     w = np.asarray(a.weights or [1.0] * len(probs), float); w /= w.sum()
     if not a.checkpoints and len(a.runs) > 1:
-        e = sum(wi * np.load(res / a.task / r / "eval.npy") for wi, r in zip(w, a.runs))
-        print(f"  {'BLEND':35s} held-out {compute_metrics(y, e.argmax(1))}")
+        evs = [res / a.task / r / "eval.npy" for r in a.runs]
+        if all(f.exists() for f in evs):
+            e = sum(wi * np.load(f) for wi, f in zip(w, evs))
+            print(f"  {'BLEND':35s} held-out {compute_metrics(y, e.argmax(1))}")
+        else:
+            n = sum(1 for f in evs if not f.exists())
+            print(f"  {'BLEND':35s} khong cham duoc ({n}/{len(evs)} run khong co eval.npy). "
+                  f"Trong so phai lay tu ban 90% tuong ung.")
     p = sum(wi * pi for wi, pi in zip(w, probs))
     assert len(p) == len(inp)
     tag = a.tag or "+".join(names)[:80]
