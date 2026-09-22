@@ -40,6 +40,28 @@ class Trainer:
         self.device = device
         self.log = logger
         self.amp_dtype = resolve_precision(self.t.get("precision", "auto"), device)
+        # self.model always stays the real module -- param_groups, save, freeze_summary and
+        # layer_mix all read it. self.net is what forward goes through, and is the same object
+        # unless there are several GPUs to split the batch across.
+        self.net = self._maybe_parallel()
+
+    def _maybe_parallel(self):
+        n_gpu = torch.cuda.device_count() if self.device.type == "cuda" else 0
+        if n_gpu < 2 or self.t.get("single_gpu"):
+            return self.model
+        # DataParallel runs forward on replicas, so anything a head records on itself as a side
+        # effect is written to a replica and thrown away -- self.model.aux_loss would stay at its
+        # initial 0.0 forever. For a sparse MoE head that silently removes the load-balancing
+        # term, the router collapses onto one expert, and the only symptom is a mediocre score.
+        # Refuse rather than hide it.
+        if getattr(self.model.head, "aux_loss", None) is not None:
+            self.log.info(f"co {n_gpu} GPU nhung head la sparse_moe -> chay 1 GPU. DataParallel "
+                          f"se lam mat aux_loss (router sup ve 1 expert ma khong bao loi).")
+            return self.model
+        gathered = self.t["batch_size"] // n_gpu
+        self.log.info(f"DataParallel tren {n_gpu} GPU -- batch {self.t['batch_size']} chia thanh "
+                      f"{gathered}/GPU")
+        return torch.nn.DataParallel(self.model)
 
     def fit(self, train_df, valid_df):
         t = self.t
@@ -77,7 +99,7 @@ class Trainer:
                 y = batch.pop("labels")
                 with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype or torch.float32,
                                     enabled=self.amp_dtype is not None):
-                    logits = self.model(**batch)
+                    logits = self.net(**batch)
                 # Running train scores, gathered from the forward passes the step already did, so
                 # they cost nothing. They are NOT a clean evaluation: dropout is on and the
                 # weights move between batches, so early-epoch batches are scored by a worse
@@ -98,7 +120,7 @@ class Trainer:
                     scaler.step(opt); scaler.update(); sch.step()
                     opt.zero_grad(set_to_none=True)
 
-            p_va = predict_proba(self.model, dl_va, self.device, self.amp_dtype) if has_val else None
+            p_va = predict_proba(self.net, dl_va, self.device, self.amp_dtype) if has_val else None
             m = compute_metrics(valid_df.y, p_va.argmax(1)) if has_val else {}
             aux_avg = aux_sum / len(dl_tr) if aux_w else None
             tm = compute_metrics(torch.cat(tr_true).numpy(), torch.cat(tr_pred).numpy())
@@ -127,6 +149,7 @@ class Trainer:
                     break
 
         if best["state"] is not None:
+            # self.model, not self.net: a DataParallel state_dict is prefixed with "module."
             self.model.load_state_dict(best["state"])  # restore best epoch
         else:
             self.log.info(f"khong co lat eval -> giu epoch CUOI ({best['epoch']}), "
@@ -139,4 +162,4 @@ class Trainer:
         if texts is None or len(texts) == 0:
             return None
         dl = make_loader(list(texts), None, self.tok, self.cfg, train=False)
-        return predict_proba(self.model, dl, self.device, self.amp_dtype)
+        return predict_proba(self.net, dl, self.device, self.amp_dtype)
