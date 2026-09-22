@@ -97,9 +97,29 @@ class TransformerClassifier(nn.Module):
         and both pooling modes are linear in the token axis, so they commute -- but it keeps one
         code path for the pooled heads and for soft_moe, which needs the sequence.
         """
+        # CANINE breaks both assumptions this makes: it returns 17 states, not
+        # num_hidden_layers + 1, and they are at two different resolutions -- some at character
+        # length, some downsampled 4x. Summing or concatenating across those shapes is either a
+        # crash or, worse, a broadcast that silently computes nonsense. Check once, here.
+        n = len(hidden_states)
+        bad = [i for i in self.layers if i >= n] if isinstance(self.layers, list) else []
+        if bad:
+            raise SystemExit(
+                f"model.layers {bad} vuot qua {n} hidden_states ma {self.meta['backbone_name']} "
+                f"tra ve. Kiem tra so tang that su cua model nay.")
+        # Checked over ALL the states, not just the selected ones: on CANINE a pair like [2, 12]
+        # can happen to share a shape while both sit at the downsampled resolution, so the concat
+        # succeeds and then silently misaligns with attention_mask. Layers are only in the same
+        # space if every state is.
+        shapes = {tuple(h.shape) for h in hidden_states}
+        if len(shapes) > 1:
+            raise SystemExit(
+                f"model.layers khong dung duoc voi {self.meta['backbone_name']}: cac hidden_states "
+                f"co shape khac nhau {sorted(shapes)}. Kien truc nay ha mau giua chung (CANINE), "
+                f"nen cac tang khong nam cung mot khong gian. Dat model.layers: null.")
+
         if self.layers == "mix":
-            h0 = hidden_states[0]
-            w = self.layer_weights.float().softmax(0).to(h0.dtype)
+            w = self.layer_weights.float().softmax(0).to(hidden_states[0].dtype)
             return sum(w[i] * h for i, h in enumerate(hidden_states))
         return torch.cat([hidden_states[i] for i in self.layers], dim=-1)
 

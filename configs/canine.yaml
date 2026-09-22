@@ -1,0 +1,31 @@
+# CANINE -- a character-level encoder with NO vocabulary at all. Every Unicode codepoint is
+# hashed straight into an embedding, so nothing can be split into subwords and nothing can be
+# out-of-vocabulary.
+#
+# This is the one architectural answer to what the measurements say is wrong here. MuRIL's
+# vocabulary was built for Indian languages in their own scripts, so romanised Kanglish arrives
+# as 2.05 subwords per word (English: 1.04) with only 36.7% of words surviving whole, and
+# `Bajetigu` becomes Ba/##jet/##ig/##u. On top of that the writing has no standard orthography:
+# 74.8% of word types occur exactly once, 26.7% of held-out words were never seen in training,
+# and one word shows up under as many as 48 spellings. Character n-grams are immune to both --
+# which is exactly why TF-IDF beats every transformer in results/metrics.csv. CANINE keeps that
+# immunity and adds self-attention on top.
+#
+#   python train.py --config configs/canine.yaml --task a
+#
+# Risk, stated up front: CANINE was pretrained on 104 Wikipedia languages, which do not include
+# romanised Kanglish. It may be just as poorly matched as MuRIL, only differently. That is the
+# experiment.
+_base_: base.yaml
+model:
+  name: google/canine-c     # canine-s uses a subword-based pretraining loss; worth trying too
+  # CANINE counts CHARACTERS, not tokens. Measured on task a: p50 51, p95 212, p99 380 chars,
+  # so 256 truncates 3.1% of rows against 13.5% at 128. It costs less than it looks: CANINE
+  # downsamples 4x before its 12 deep blocks, so max_len 256 puts 64 positions through them --
+  # fewer than MuRIL's 96 tokens.
+  # model.layers must stay null here. CANINE returns 17 hidden states at two different
+  # resolutions (character-length and 4x-downsampled), so they cannot be summed or concatenated;
+  # classifier.py raises a clear error rather than broadcasting nonsense.
+  layers: null
+data:
+  max_len: 256

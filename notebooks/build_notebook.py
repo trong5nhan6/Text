@@ -208,7 +208,7 @@ Chạy cả năm: mỗi run ~10 giây, và **blend của chúng hơn hẳn model
 thấp nhưng chỉ đồng thuận 73–79% với nhóm tuyến tính nên đóng góp nhiều nhất cho ensemble.""")
 code('''import itertools, time
 
-CLFS       = ['lr', 'svm', 'ridge', 'cnb', 'sgd']
+CLFS       = ['lr', 'svm', 'sgd']       # da bo: 'ridge', 'cnb'
 TASKS_ML   = ['a', 'b']
 TEXT_TYPES = ['latin']        # <- doi o day. them 'kn', 'both' de chay ca ba goc nhin
                               #    latin = chu Latin goc | kn = chu Kannada | both = ca hai
@@ -295,8 +295,11 @@ Trên T4 mỗi run ≈ **4–7 phút** (task A 180 step/epoch, task B 89 step/ep
 > model hội tụ.""")
 code('''import time
 
-CONFIGS = ['muril', 'roberta', 'indicbert', 'bert', 'deberta', 'modernbert',
-           'cnerg_muril', 'cnerg_xlmr']            # bo bot neu thieu gio
+CONFIGS = ['muril', 'roberta', 'bert', 'cnerg_muril', 'cnerg_xlmr']
+# da bo bot cho nhanh: 'indicbert', 'deberta', 'modernbert'
+# canine = model muc KY TU, khong co tu vung -> khong the OOV, khong the bi xe vun.
+#   Them 'canine' vao list de chay. Luu y no dem KY TU: configs/canine.yaml
+#   dat data.max_len=256 (cat 3,1% dong; o 128 la 13,5%).
 # cnerg_* = checkpoint DA fine-tune san tren abusive/offensive Kannada code-mixed;
 #   cung kien truc va cung tham so train voi muril/roberta, chi khac diem xuat phat.
 # Ban large (24 block, ~500M): them 'muril_large' / 'roberta_large'. Cham hon ~3 lan va
