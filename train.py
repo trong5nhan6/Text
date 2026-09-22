@@ -25,7 +25,7 @@ import pandas as pd
 import yaml
 
 from src.data.dataset import (infer_columns, label_names, load_split, require_columns,
-                              split_rows, text_columns)
+                              split_rows, text_columns, use_valdataset)
 from src.data.preprocessing import ensure_processed
 from src.evaluation.metrics import compute_metrics, rebuild_metrics_table
 from src.evaluation.submission import write_submission
@@ -75,7 +75,8 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     loss_name = resolve_loss(cfg)
     cols, infer_cols = text_columns(cfg), infer_columns(cfg)
-    fit, ev = split_rows(require_columns(train, set(cols) | set(infer_cols), "train"))
+    fit, ev = split_rows(require_columns(train, set(cols) | set(infer_cols), "train"),
+                         use_valdataset(cfg))
     require_columns(val, infer_cols, "val")
     if test is not None:
         require_columns(test, infer_cols, "test")
@@ -91,7 +92,9 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     log.info(f"device={device} model={cfg['model']['name']} loss={loss_name} "
              f"precision={cfg['training']['precision']} | text_type={cfg['data']['text_type'] or 'latin'}"
              f"{' +tta' if cfg['data'].get('tta') else ''}"
-             f" | {len(fit)} fit / {len(ev)} eval")
+             f" | {len(fit)} fit / {len(ev)} eval"
+             + ("  [use_valdataset=false: train tren 100% du lieu, khong cham diem duoc]"
+                if len(ev) == 0 else ""))
 
     set_seed(cfg["seed"])
     t0 = time.time()
@@ -101,7 +104,8 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     log.info(f"san sang sau {time.time() - t0:.0f}s")
     log.info(f"freeze: {model.freeze_summary}")
     trainer = Trainer(cfg, model, tokenizer, build_loss(loss_name, cfg["training"], counts), device, log)
-    best = trainer.fit(fit.assign(text=fit[train_col]), ev.assign(text=ev[train_col]))
+    best = trainer.fit(fit.assign(text=fit[train_col]),
+                       ev.assign(text=ev[train_col]) if len(ev) else None)
 
     def predict(df):
         """Average over the requested views. fit() leaves the model at its best epoch, so one
@@ -121,7 +125,7 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
             log.info(f"!! trong so mix gan nhu KHONG doi -> mix dang chi la trung binh deu. "
                      f"Tang training.layer_mix_lr (dang {cfg['training'].get('layer_mix_lr')}) "
                      f"len 5e-3 hoac train nhieu step hon.")
-    out = {"eval": best["pred"] if single else predict(ev),
+    out = {"eval": None if len(ev) == 0 else (best["pred"] if single else predict(ev)),
            "val": predict(val), "test": None if test is None else predict(test),
            "extra": {"model": cfg["model"]["name"], "loss": loss_name, "best_epoch": best["epoch"],
                      **({"layer_mix": mix} if mix is not None else {})}}
@@ -161,12 +165,18 @@ def main():
     else:
         out = train_transformer(cfg, train, val, test, len(labels), run_dir, log)
 
-    np.save(run_dir / "eval.npy", out["eval"]); np.save(run_dir / "val.npy", out["val"])
+    np.save(run_dir / "val.npy", out["val"])
     if out["test"] is not None:
         np.save(run_dir / "test.npy", out["test"])
-    _, ev = split_rows(train)
-    metrics = {**compute_metrics(ev.y, out["eval"].argmax(1)), **out["extra"],
-               "n_eval": len(ev), "has_test": out["test"] is not None, "labels": labels}
+    _, ev = split_rows(train, use_valdataset(cfg))
+    # No eval.npy at all when there is no held-out slice, rather than an empty one: evaluate.py
+    # discovers runs by that file, so this keeps an unscorable run out of every comparison and
+    # every blend instead of letting it contribute predictions nobody checked.
+    if out["eval"] is not None:
+        np.save(run_dir / "eval.npy", out["eval"])
+    metrics = {**(compute_metrics(ev.y, out["eval"].argmax(1)) if out["eval"] is not None else {}),
+               **out["extra"], "n_eval": len(ev), "has_test": out["test"] is not None,
+               "labels": labels, "scored": out["eval"] is not None}
     json.dump(metrics, open(run_dir / "metrics.json", "w"), indent=1)
     rebuild_metrics_table(res_dir)
 
@@ -175,8 +185,12 @@ def main():
     write_submission(val.id.values, out["val"], labels, subs / f"{cfg['task']}_val_{name}", log.info)
     if out["test"] is not None:
         write_submission(test.id.values, out["test"], labels, subs / f"{cfg['task']}_test_{name}", log.info)
-    log.info(f"==> {cfg['task']}/{name} [{len(ev)} eval rows]: "
-             f"macro-F1 {metrics['macro_f1']:.4f} | acc {metrics['accuracy']:.4f}")
+    if out["eval"] is None:
+        log.info(f"==> {cfg['task']}/{name}: train tren 100% du lieu ({len(train)} dong), "
+                 f"KHONG co diem noi bo. File nop da sinh; run nay khong vao blend.")
+    else:
+        log.info(f"==> {cfg['task']}/{name} [{len(ev)} eval rows]: "
+                 f"macro-F1 {metrics['macro_f1']:.4f} | acc {metrics['accuracy']:.4f}")
 
 
 if __name__ == "__main__":

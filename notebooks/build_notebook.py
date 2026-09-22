@@ -44,6 +44,7 @@ KNOBS = [
     ("data.text_type", "null/latin = chu Latin | kn = chu Kannada | both = ca hai"),
     ("data.tta", "CHI transformer: infer ca 2 chu viet roi trung binh (tfidf se bi tu choi)"),
     ("data.max_len", "Religion / Geo-political dai hon, hay bi cat o 96"),
+    ("data.use_valdataset", "false = train 100% du lieu, KHONG cham diem duoc -> chi cho ban nop cuoi"),
     ("--- model ---", None),
     ("model.name", "DE len MOI config trong CONFIGS -> chi bo # khi chay dung 1 config"),
     ("model.pooling", "cls | mean"),

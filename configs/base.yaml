@@ -25,6 +25,14 @@ data:
   # every other run; it costs one extra forward pass and the run name gains _tta.
   # Rejected for tfidf, where the two scripts share no n-grams and the second view is empty.
   tta: null
+  # false fits on every labelled row instead of holding 10% back. Only for the final model you
+  # intend to submit, and only after an ordinary run has settled the epoch count: without the
+  # held-out slice a run cannot pick its best epoch (it keeps the LAST one), cannot stop early,
+  # writes no eval.npy, gets no score in metrics.csv, and is excluded from every blend. It still
+  # writes val.npy / test.npy, so the submission files are produced as usual. The run name gains
+  # _full so it can never share a directory with the 90% version.
+  # null and true both mean "hold the slice back" -- the default, and what every finished run did.
+  use_valdataset: null
   val_ratio: 0.1            # one 90/10 split: fit on 90%, score on the held-out 10%
   split_seed: 42            # keep fixed -> every run shares the split, so runs can be blended
   max_len: 96               # 95% of comments < 35 words

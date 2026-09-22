@@ -44,7 +44,12 @@ class Trainer:
     def fit(self, train_df, valid_df):
         t = self.t
         dl_tr = make_loader(train_df.text.tolist(), train_df.y.tolist(), self.tok, self.cfg, train=True)
-        dl_va = make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False)
+        # No held-out slice (data.use_valdataset: false): nothing to score against, so there is
+        # no best epoch to keep and no early stopping. The run trains the full schedule and
+        # returns its LAST epoch, which is why `epochs` has to be set deliberately in this mode.
+        has_val = valid_df is not None and len(valid_df) > 0
+        dl_va = (make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False)
+                 if has_val else None)
 
         pg = self.model.param_groups(t["lr"], t.get("head_lr"), t["weight_decay"], t.get("llrd"),
                                      t.get("layer_mix_lr"))
@@ -93,20 +98,24 @@ class Trainer:
                     scaler.step(opt); scaler.update(); sch.step()
                     opt.zero_grad(set_to_none=True)
 
-            p_va = predict_proba(self.model, dl_va, self.device, self.amp_dtype)
-            m = compute_metrics(valid_df.y, p_va.argmax(1))
+            p_va = predict_proba(self.model, dl_va, self.device, self.amp_dtype) if has_val else None
+            m = compute_metrics(valid_df.y, p_va.argmax(1)) if has_val else {}
             aux_avg = aux_sum / len(dl_tr) if aux_w else None
             tm = compute_metrics(torch.cat(tr_true).numpy(), torch.cat(tr_pred).numpy())
             history.append({"epoch": ep, "loss": round(total / len(dl_tr), 4),
                             "train_macro_f1": round(tm["macro_f1"], 4),
                             "train_accuracy": round(tm["accuracy"], 4),
                             **({"moe_aux": round(aux_avg, 4)} if aux_w else {}), **m})
-            improved = m["macro_f1"] > best["f1"]
+            improved = has_val and m["macro_f1"] > best["f1"]
             self.log.info(f"ep {ep}/{t['epochs']} loss {total / len(dl_tr):.4f} "
                           f"| train F1 {tm['macro_f1']:.4f} acc {tm['accuracy']:.4f} "
-                          f"| eval F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} "
+                          + (f"| eval F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} " if has_val
+                             else "| khong co lat eval (use_valdataset=false) ")
                           + (f"moe_aux {aux_avg:.3f} " if aux_w else "")
                           + f"({time.time() - t0:.0f}s){' *' if improved else ''}")
+            if not has_val:
+                best = {"f1": float("nan"), "epoch": ep, "pred": None, "state": None}
+                continue
             if improved:
                 bad = 0
                 best = {"f1": m["macro_f1"], "epoch": ep, "pred": p_va,
@@ -117,7 +126,11 @@ class Trainer:
                     self.log.info(f"early stop (no improvement for {patience} epochs)")
                     break
 
-        self.model.load_state_dict(best["state"])      # restore best epoch
+        if best["state"] is not None:
+            self.model.load_state_dict(best["state"])  # restore best epoch
+        else:
+            self.log.info(f"khong co lat eval -> giu epoch CUOI ({best['epoch']}), "
+                          f"khong chon duoc epoch tot nhat")
         best["history"] = history
         del best["state"], opt
         return best

@@ -21,9 +21,27 @@ def label_names(task: str):
     return TASKS[task]["labels"]
 
 
-def split_rows(train):
+def use_valdataset(cfg) -> bool:
+    """data.use_valdataset: false trains on every labelled row instead of holding 10% back.
+
+    null and true both mean "hold the slice back", which is the default and what every finished
+    run did. Only an explicit false changes anything -- and it changes a lot, so read split_rows.
+    """
+    return cfg.get("data", {}).get("use_valdataset") is not False
+
+
+def split_rows(train, use_val: bool = True):
     """-> (fit_df, eval_df). Every run uses the same split, so eval_df is identical
-    across runs and their saved predictions line up row for row."""
+    across runs and their saved predictions line up row for row.
+
+    use_val=False returns every row as the fit set and an empty eval set. That is the
+    train-on-everything mode: it buys ~10% more training data and gives up, in exchange, the
+    only labelled scoring set there is. Without it a run cannot pick its best epoch, cannot stop
+    early, cannot be scored, and cannot join a blend -- so it is for the final submission model
+    only, after the epoch count has been settled by an ordinary run.
+    """
+    if not use_val:
+        return train, train.iloc[:0]
     return train[train.is_val == 0], train[train.is_val == 1]
 
 

@@ -9,7 +9,7 @@ from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import make_pipeline
 from sklearn.svm import LinearSVC
 
-from src.data.dataset import require_columns, split_rows, text_columns
+from src.data.dataset import require_columns, split_rows, text_columns, use_valdataset
 from src.evaluation.metrics import compute_metrics
 
 # Regularisation grid per classifier. `lr`/`svm` take C (inverse strength, bigger = weaker),
@@ -112,7 +112,16 @@ def fit_and_score(cfg, train, val, test, n_labels, log=print):
                          "cua hai he chu roi rac nhau. Dung data.text_type=both thay the.")
     if cols != ["text"]:
         log(f"  text_type={cfg['data']['text_type']} -> dac trung tu cot {cols}")
-    fit, ev = split_rows(require_columns(train, cols, "train"))
+    fit, ev = split_rows(require_columns(train, cols, "train"), use_valdataset(cfg))
+    if len(ev) == 0 and len(grid) > 1:
+        # Every value in the grid is fitted and the best held-out score wins. With no held-out
+        # slice there is nothing to compare, and silently taking the first value would hide the
+        # fact that the regularisation strength was never chosen. Pin it explicitly, to whatever
+        # the ordinary run already found and printed in results/metrics.csv.
+        raise SystemExit(
+            f"data.use_valdataset=false can mot gia tri {unit} duy nhat, nhung luoi dang co "
+            f"{len(grid)}: {grid}. Xem {unit} tot nhat o results/metrics.csv roi ghim lai, vi du "
+            f'--set "model.param_grid=[{grid[len(grid) // 2]}]"')
     require_columns(val, cols, "val")
     if test is not None:
         require_columns(test, cols, "test")
@@ -120,10 +129,13 @@ def fit_and_score(cfg, train, val, test, n_labels, log=print):
     best = None
     for param in grid:
         pipe = build_tfidf(mcfg, param, balanced, cfg.get("seed", 42), cols).fit(fit[cols], fit.y)
-        p_eval = _proba(pipe, ev[cols])
-        m = compute_metrics(ev.y, p_eval.argmax(1))
-        log(f"  {unit}={param}: macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f}")
-        if best is None or m["macro_f1"] > best["macro_f1"]:
+        p_eval = None if len(ev) == 0 else _proba(pipe, ev[cols])
+        m = {"macro_f1": float("nan"), "accuracy": float("nan")} if p_eval is None else             compute_metrics(ev.y, p_eval.argmax(1))
+        if p_eval is None:
+            log(f"  {unit}={param}: fit tren 100% du lieu ({len(fit)} dong), khong cham diem")
+        else:
+            log(f"  {unit}={param}: macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f}")
+        if best is None or (p_eval is not None and m["macro_f1"] > best["macro_f1"]):
             best = {"macro_f1": m["macro_f1"], "C": param, "unit": unit,
                     "balanced": balanced, "eval": p_eval,
                     "val": _proba(pipe, val[cols]),

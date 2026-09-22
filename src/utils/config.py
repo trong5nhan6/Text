@@ -81,7 +81,10 @@ def run_name(cfg: dict) -> str:
         return cfg["run_name"]
     base = (f"{cfg['config_name']}_{cfg['model'].get('clf', 'lr')}" if cfg["model"]["type"] == "tfidf"
             else f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}")
-    return base + text_suffix(cfg) + (cfg.get("run_suffix") or "")
+    # _full is automatic: a model fitted on 100% of the rows must never land in the same
+    # directory as one fitted on 90%, because only the latter has an eval.npy to compare.
+    full = "" if cfg.get("data", {}).get("use_valdataset") is not False else "_full"
+    return base + text_suffix(cfg) + full + (cfg.get("run_suffix") or "")
 
 
 def dump(cfg: dict, path):
