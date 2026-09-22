@@ -27,10 +27,12 @@ The organisers' unlabelled val/test inputs *are* included: that is ordinary tran
 it is the setting the submission actually runs in. Say so in the paper.
 """
 import argparse
+import math
 import time
 from pathlib import Path
 
 import pandas as pd
+import src.utils.hf_quiet    # noqa: F401  -- import before transformers: silences its bars
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -99,7 +101,11 @@ def parse():
     ap.add_argument("--model", default="google/muril-base-cased")
     ap.add_argument("--out", help="default: checkpoints/mlm/<model basename>")
     ap.add_argument("--epochs", type=int, default=15)
-    ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--batch_size", type=int, default=8,
+                    help="small on purpose: the MLM logits are [batch, len, vocab] and MuRIL's "
+                         "vocab is 197,285, so batch 32 at len 128 needs 3.2 GB for one such "
+                         "tensor and OOMs a T4. Raise the effective batch with --grad_accum.")
+    ap.add_argument("--grad_accum", type=int, default=4)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--max_len", type=int, default=128)
     ap.add_argument("--mlm_probability", type=float, default=0.15)
@@ -140,7 +146,24 @@ def main():
     dl = DataLoader(ds, batch_size=a.batch_size, shuffle=True, num_workers=2,
                     collate_fn=DataCollatorForLanguageModeling(tok, mlm_probability=a.mlm_probability))
     log.info(f"kho: {len(corpus):,} dong, {n_tok:,} token ({n_tok / len(corpus):.1f} token/dong)")
-    log.info(f"device={device} precision={amp} | {a.epochs} epoch x {len(dl)} step, lr {a.lr:g}")
+    log.info(f"device={device} precision={amp} | {a.epochs} epoch x {len(dl)} step "
+             f"(batch {a.batch_size} x grad_accum {a.grad_accum} = {a.batch_size * a.grad_accum} "
+             f"hieu dung), lr {a.lr:g}")
+
+    # The MLM head emits [batch, len, vocab] and MuRIL's vocab is 197,285, so that one tensor --
+    # kept twice, forwards and backwards -- dominates everything else and is what OOMs a T4.
+    # Print the estimate before training rather than after the crash.
+    n_par = sum(p.numel() for p in model.parameters())
+    vocab = model.config.vocab_size
+    gb_logits = 2 * a.batch_size * a.max_len * vocab * 4 / 1e9
+    gb_model = n_par * 16 / 1e9          # weights + grads + AdamW's two states, fp32
+    log.info(f"uoc luong VRAM: logits {gb_logits:.2f} GB (batch x len x vocab {vocab:,}) "
+             f"+ model/AdamW {gb_model:.2f} GB + kich hoat ~1 GB = ~{gb_logits + gb_model + 1:.1f} GB")
+    if torch.cuda.is_available():
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        log.info(f"  GPU co {total:.1f} GB"
+                 + ("  -- CHAT, giam --batch_size hoac --max_len neu OOM"
+                    if gb_logits + gb_model + 1 > 0.75 * total else ""))
 
     decay = [p for n, p in model.named_parameters()
              if p.requires_grad and not any(k in n for k in ("bias", "LayerNorm.weight"))]
@@ -148,24 +171,32 @@ def main():
                 if p.requires_grad and any(k in n for k in ("bias", "LayerNorm.weight"))]
     opt = torch.optim.AdamW([{"params": decay, "weight_decay": a.weight_decay},
                              {"params": no_decay, "weight_decay": 0.0}], lr=a.lr)
-    steps = len(dl) * a.epochs
+    steps = math.ceil(len(dl) / a.grad_accum) * a.epochs
     sch = get_linear_schedule_with_warmup(opt, int(a.warmup_ratio * steps), steps)
     scaler = torch.amp.GradScaler(enabled=amp == torch.float16)
 
     model.train()
     for ep in range(1, a.epochs + 1):
         t0, total = time.time(), 0.0
-        for batch in dl:
+        opt.zero_grad(set_to_none=True)
+        for i, batch in enumerate(dl):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=amp or torch.float32,
                                 enabled=amp is not None):
                 loss = model(**batch).loss
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(opt); scaler.update(); sch.step()
             total += loss.item()
+            scaler.scale(loss / a.grad_accum).backward()
+            if (i + 1) % a.grad_accum == 0 or i + 1 == len(dl):
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # A skipped step (the scaler saw inf/nan and lowered its scale) must not advance
+                # the schedule; stepping anyway is what produces the "lr_scheduler.step() before
+                # optimizer.step()" warning, and it silently shortens the LR schedule.
+                prev = scaler.get_scale()
+                scaler.step(opt); scaler.update()
+                if scaler.get_scale() >= prev:
+                    sch.step()
+                opt.zero_grad(set_to_none=True)
         mean = total / len(dl)
         # Perplexity is the number to watch: it starts high because the vocabulary pieces are
         # wrong for this text, and falling is exactly the adaptation this script exists to do.

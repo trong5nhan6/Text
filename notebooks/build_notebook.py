@@ -789,7 +789,25 @@ code('''!python pretrain_mlm.py --model google/muril-base-cased --epochs 15
 # !python pretrain_mlm.py --model Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL --epochs 15
 # !python pretrain_mlm.py --model xlm-roberta-base --epochs 15
 # !python pretrain_mlm.py --epochs 20 --lr 1e-4        # kho nho -> co the can lr cao hon
-# !python pretrain_mlm.py --include_eval               # CHI cho ban nop cuoi, diem noi bo se lac quan''')
+# !python pretrain_mlm.py --include_eval               # CHI cho ban nop cuoi, diem noi bo se lac quan
+#
+# NEU OOM: giam --batch_size (va tang --grad_accum de giu batch hieu dung):
+# !python pretrain_mlm.py --batch_size 4 --grad_accum 8 --epochs 15
+# !python pretrain_mlm.py --batch_size 8 --grad_accum 4 --max_len 96 --epochs 15''')
+
+md("""> **Về OOM.** Logits của MLM có shape `[batch, len, vocab]`, mà vocab của MuRIL là
+> **197.285** — nên riêng một tensor đó ở `batch 32 × len 128` đã chiếm **3,2 GB**, và phải giữ
+> hai bản (xuôi + ngược). Đó là thứ làm nổ T4, không phải model.
+>
+> | batch × len | logits (xuôi+ngược) | + model/AdamW | ~tổng |
+> |---|---|---|---|
+> | 32 × 128 | 6,46 GB | 3,81 GB | ~11,5 GB → **OOM** |
+> | 16 × 128 | 3,23 GB | 3,81 GB | ~8,2 GB |
+> | **8 × 128** | **1,62 GB** | 3,81 GB | **~6,6 GB** ✅ mặc định |
+> | 4 × 128 | 0,81 GB | 3,81 GB | ~5,8 GB |
+>
+> Mặc định là `--batch_size 8 --grad_accum 4`, tức batch hiệu dụng vẫn 32. Script in ước lượng
+> VRAM **trước khi** train, nên bạn biết trước chứ không phải đợi nó crash.""")
 
 md("""## 3) Fine-tune từ checkpoint vừa thích nghi
 
