@@ -1,0 +1,49 @@
+# A decoder LLM as the encoder, with LoRA. The direction every encoder result points at.
+#
+# Seven architectures, three tokenisation regimes and two script conversions all landed in
+# 0.78-0.82, while the one thing that moved the score was MLM on in-domain text (+0.134 on task
+# b). That says the constraint is how much Kanglish the model has read, not how it is wired --
+# and a decoder LLM pretrained on trillions of web tokens has read orders of magnitude more
+# romanised Indic text than MuRIL's corpus, which is mostly native script.
+#
+#   python train.py --config configs/llm.yaml --task a
+#
+# Three things differ from an encoder config and all three are load-bearing:
+#
+# pooling: last -- decoders attend causally, so position 0 sees only itself. `cls` would read the
+#   BOS token and throw the comment away, scoring near chance with no error anywhere.
+#
+# lora -- full fine-tuning of a 2B model on 2,827 rows is about a million parameters per example.
+#   LoRA trains a few million instead and leaves the pretrained weights alone, which is the
+#   entire reason a big pretrained model is worth starting from here.
+#
+# lr 1e-4 -- LoRA adapters start from zero and need a rate an order above the 2e-5 that suits a
+#   fully fine-tuned encoder.
+#
+# Needs: pip install peft bitsandbytes accelerate
+# checkpoint.save must stay none: a LoRA/4-bit state_dict does not reload through model.load(),
+# and train.py refuses rather than writing one that fails later. eval.npy, val.npy and the
+# submission files are produced as usual.
+_base_: base.yaml
+model:
+  name: sarvamai/sarvam-1        # 2B, Indic-focused. Alternatives, same settings:
+                                 #   Telugu-LLM-Labs/Indic-gemma-2b-finetuned-sft-Navarasa-2.0
+                                 #   ai4bharat/Airavata            (7B -> set load_in_4bit: true)
+  pooling: last
+  load_in_4bit: null             # true for a 7B on a T4; a 2B fits in fp16 without it
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    # target_modules: defaults to the Llama/Gemma/Qwen projection names, filtered to the ones
+    # this model actually has.
+training:
+  lr: 1.0e-4
+  head_lr: 1.0e-4
+  epochs: 4
+  early_stopping_patience: 4
+  batch_size: 8
+  grad_accum: 4                  # effective 32, same as the encoder runs
+  llrd: null                     # LoRA already restricts what moves; decaying it too is double
+checkpoint:
+  save: none

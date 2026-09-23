@@ -48,7 +48,7 @@ KNOBS = [
     ("data.use_valdataset", "false = train 100% du lieu, KHONG cham diem duoc -> chi cho ban nop cuoi"),
     ("--- model ---", None),
     ("model.name", "DE len MOI config trong CONFIGS -> chi bo # khi chay dung 1 config"),
-    ("model.pooling", "cls | mean"),
+    ("model.pooling", "cls | mean | last  (LLM giai ma BAT BUOC dung last)"),
     ("model.dropout", None),
     ("model.unfreeze_last_n_blocks", "null = train tat ca | 4 = chi 4 khoi cuoi | 0 = chi head"),
     ("model.freeze_embeddings", "null = theo khoa tren | true | false"),
@@ -164,6 +164,8 @@ print("cwd:", os.getcwd())
 print(subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())''')
 
 code('''!pip -q install ftfy sentencepiece tiktoken
+# Chi can khi chay configs/llm.yaml (LLM giai ma + LoRA):
+# !pip -q install peft bitsandbytes accelerate
 !nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 import torch, transformers
 print("torch", torch.__version__, "| transformers", transformers.__version__,
@@ -298,6 +300,10 @@ code('''import time
 
 CONFIGS = ['muril', 'roberta', 'bert', 'cnerg_muril', 'cnerg_xlmr']
 # da bo bot cho nhanh: 'indicbert', 'deberta', 'modernbert'
+# llm = LLM giai ma + LoRA (configs/llm.yaml). Can: pip install peft bitsandbytes accelerate.
+#   Huong duy nhat con lai chua do ma co co so: 7 kien truc encoder deu 0,78-0,82, con thu
+#   DUY NHAT lam diem nhay la MLM tren van ban dung mien (+0,134 task b) -- tuc rang buoc la
+#   model da DOC bao nhieu Kanglish, khong phai no duoc noi day the nao.
 # canine = model muc KY TU, khong co tu vung -> khong the OOV, khong the bi xe vun.
 #   Them 'canine' vao list de chay. Luu y no dem KY TU: configs/canine.yaml
 #   dat data.max_len=256 (cat 3,1% dong; o 128 la 13,5%).

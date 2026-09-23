@@ -53,9 +53,21 @@ class TransformerClassifier(nn.Module):
     def __init__(self, backbone_name: str, num_labels: int, pooling: str = "cls",
                  dropout: float = 0.1, backbone_config=None,
                  unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
-                 layers=None):
+                 layers=None, load_in_4bit=False, lora=None):
         super().__init__()
-        if backbone_config is None:                      # training: load pretrained weights
+        self.name = backbone_name        # needed before self.meta exists, e.g. by _apply_lora
+        self.quantized = bool(load_in_4bit)
+        if load_in_4bit and backbone_config is None:
+            # A 7B decoder needs ~14 GB in fp16 and ~4 GB in nf4, which is the difference between
+            # fitting on a T4 and not. Never call .float() on it afterwards: that would
+            # de-quantise straight back to the memory this exists to avoid.
+            import torch as _t
+            from transformers import BitsAndBytesConfig
+            self.backbone = AutoModel.from_pretrained(
+                backbone_name, quantization_config=BitsAndBytesConfig(
+                    load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=_t.float16))
+        elif backbone_config is None:                    # training: load pretrained weights
             # .float() is not redundant: some published checkpoints store fp16 weights
             # (mDeBERTa-v3 does) and transformers keeps the checkpoint's dtype, which then
             # meets the fp32 head as "mat1 and mat2 must have the same dtype". AMP wants fp32
@@ -65,6 +77,8 @@ class TransformerClassifier(nn.Module):
             # .float() for the same reason, from the other direction: a config saved off an fp16
             # backbone builds an fp16 one, and load_state_dict copies in place, so fp16 would stick.
             self.backbone = AutoModel.from_config(backbone_config).float()
+        if lora:
+            self._apply_lora(lora)
         head_cfg = dict(head_cfg or {"head": "linear"})
         hidden = self.backbone.config.hidden_size
         n_hs = self._n_hidden_states()
@@ -84,6 +98,32 @@ class TransformerClassifier(nn.Module):
         # excludes it from the LLRD ladder by that prefix, and both must keep holding.
         self.head = build_head(head_cfg.get("head"), width, num_labels, head_cfg)
         self.freeze_summary = self._apply_freezing(unfreeze_last_n_blocks, freeze_embeddings)
+
+    # Attention and MLP projections, by the names the Llama/Gemma/Qwen families use. Anything a
+    # given model does not have is dropped before peft sees it, so one list covers all of them.
+    LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+
+    def _apply_lora(self, lora):
+        """Low-rank adapters on the backbone. Full fine-tuning of a 2B decoder on 2,827 rows is
+        roughly a million parameters per example; LoRA keeps the trainable count in the millions
+        and leaves the pretrained weights alone, which is the whole reason a big model is worth
+        starting from here."""
+        try:
+            from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+        except ImportError:
+            raise SystemExit("model.lora can peft: pip install peft bitsandbytes accelerate")
+        cfg = lora if isinstance(lora, dict) else {}
+        present = {n.split(".")[-1] for n, _ in self.backbone.named_modules()}
+        targets = [t for t in cfg.get("target_modules", self.LORA_TARGETS) if t in present]
+        if not targets:
+            raise SystemExit(f"khong tim thay lop nao de gan LoRA trong {self.name}; "
+                             f"dat model.lora.target_modules bang tay")
+        if self.quantized:
+            self.backbone = prepare_model_for_kbit_training(self.backbone)
+        self.backbone = get_peft_model(self.backbone, LoraConfig(
+            r=cfg.get("r", 16), lora_alpha=cfg.get("alpha", 32),
+            lora_dropout=cfg.get("dropout", 0.05), bias="none", target_modules=targets))
+        self.lora_targets = targets
 
     def _n_hidden_states(self) -> int:
         """hidden_states has one entry per block plus one for the embedding output, so a 12-block
@@ -134,7 +174,22 @@ class TransformerClassifier(nn.Module):
         """Freeze everything below the last `unfreeze_last_n` blocks. The head and the modules
         that sit *above* the last block (mDeBERTa's encoder.LayerNorm, ModernBERT's final_norm)
         always stay trainable -- freezing those would cut the path the gradient needs.
-        `freeze_emb=None` means: follow the block setting."""
+        `freeze_emb=None` means: follow the block setting.
+
+        With LoRA this steps aside entirely. peft has already frozen every base weight and left
+        only the adapters trainable, which is the whole point; the embedding branch below calls
+        requires_grad_(True) on anything matching "embed" and would hand back the entire
+        embedding matrix -- measured at 145M of 503M trainable on a 0.5B model where LoRA r=16
+        should account for about 8M."""
+        if getattr(self, "lora_targets", None):
+            if unfreeze_last_n is not None or freeze_emb is not None:
+                raise SystemExit("model.lora khong di chung voi unfreeze_last_n_blocks / "
+                                 "freeze_embeddings: LoRA da quyet dinh cai gi duoc train.")
+            trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.parameters())
+            return (f"LoRA tren {len(self.lora_targets)} loai lop | "
+                    f"{trainable / 1e6:.1f}M / {total / 1e6:.1f}M params "
+                    f"({100 * trainable / total:.2f}%)")
         if freeze_emb is None:
             freeze_emb = unfreeze_last_n is not None
         prefix, n_blocks = block_layout(self.backbone)
@@ -201,6 +256,13 @@ class TransformerClassifier(nn.Module):
         if self.pooling == "mean":
             m = attention_mask.unsqueeze(-1).to(h.dtype)
             pooled = (h * m).sum(1) / m.sum(1).clamp(min=1e-6)
+        elif self.pooling == "last":
+            # Decoder LLMs attend causally, so position 0 sees only itself and carries nothing
+            # about the sentence -- `cls` pooling on one of them reads the BOS token and quietly
+            # throws the comment away. The last real token is the only position that has seen
+            # all of them. Collator pads on the right, so that index is attention_mask.sum-1.
+            idx = attention_mask.sum(1).long() - 1
+            pooled = h[torch.arange(h.size(0), device=h.device), idx]
         else:
             pooled = h[:, 0]
         return self.head(self.dropout(pooled))
@@ -276,6 +338,13 @@ class TransformerClassifier(nn.Module):
 
     # ---------- checkpoint I/O ----------
     def save(self, out_dir, tokenizer=None, half=True, extra=None):
+        # A quantised or LoRA-wrapped state_dict does not come back through load(): the 4-bit
+        # tensors are not plain weights, and peft renames every module it wraps. Writing one
+        # would produce a checkpoint that silently fails to restore later, so refuse now and say
+        # what to do instead.
+        if self.quantized or getattr(self, "lora_targets", None):
+            raise SystemExit("khong luu duoc checkpoint khi dung model.load_in_4bit / model.lora. "
+                             "Dat checkpoint.save=none; eval.npy va file nop van duoc sinh.")
         out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
         sd = {k: (v.half() if half and v.is_floating_point() else v).cpu() for k, v in self.state_dict().items()}
         torch.save(sd, out_dir / "model.pt")
