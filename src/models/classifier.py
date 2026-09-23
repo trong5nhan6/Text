@@ -29,6 +29,38 @@ def block_layout(backbone):
     return prefix, max(idx) + 1
 
 
+def _neutralise_torchao_check():
+    """Stop peft's torchao probe from raising, so LoRA does not depend on the host's torchao.
+
+    While injecting adapters peft asks each optional backend whether it is available, and its
+    torchao check raises ImportError when the installed torchao is older than it wants rather
+    than simply answering no. Kaggle ships 0.10.0 against peft's >=0.16, so `get_peft_model`
+    died before touching a single layer -- on an integration nothing in this pipeline uses.
+
+    Answering "no" is exactly right here, and doing it in code means the run does not hinge on
+    someone remembering to uninstall a package first. Only the probe is replaced, and only when
+    it actually raises; a healthy torchao is left alone.
+    """
+    try:
+        from peft import import_utils
+    except ImportError:
+        return
+    try:
+        import_utils.is_torchao_available()
+        return                                  # healthy, or absent -- either way, leave it
+    except ImportError:
+        pass
+    false = (lambda: False)
+    import_utils.is_torchao_available = false
+    # The dispatcher imported the function by name, so its own module-level reference is the
+    # one that actually gets called; patching import_utils alone would change nothing.
+    try:
+        from peft.tuners.lora import torchao as lora_torchao
+        lora_torchao.is_torchao_available = false
+    except ImportError:
+        pass
+
+
 def _check_layers(layers, n_hs: int, backbone_name: str):
     """null | "mix" | a list of hidden-state indices. Validated here so a typo fails at build
     time with the valid range, instead of as an IndexError mid-epoch."""
@@ -120,23 +152,10 @@ class TransformerClassifier(nn.Module):
                              f"dat model.lora.target_modules bang tay")
         if self.quantized:
             self.backbone = prepare_model_for_kbit_training(self.backbone)
-        try:
-            self.backbone = get_peft_model(self.backbone, LoraConfig(
-                r=cfg.get("r", 16), lora_alpha=cfg.get("alpha", 32),
-                lora_dropout=cfg.get("dropout", 0.05), bias="none", target_modules=targets))
-        except ImportError as e:
-            # peft runs a dispatcher per optional backend while injecting adapters, and its
-            # torchao check raises instead of returning False when the installed torchao is
-            # older than it wants. Kaggle ships 0.10.0. Nothing here uses torchao, so removing
-            # it makes the check return False cleanly. The raw error names neither peft nor the
-            # fix, so translate it.
-            if "torchao" not in str(e):
-                raise
-            raise SystemExit(" | ".join([
-                f"peft xung dot voi torchao co san tren may nay ({e})",
-                "khong co gi trong pipeline dung torchao",
-                "go no di la xong:  pip uninstall -y torchao",
-                "hoac nang cap:  pip install -U 'torchao>=0.16'"]))
+        _neutralise_torchao_check()
+        self.backbone = get_peft_model(self.backbone, LoraConfig(
+            r=cfg.get("r", 16), lora_alpha=cfg.get("alpha", 32),
+            lora_dropout=cfg.get("dropout", 0.05), bias="none", target_modules=targets))
         self.lora_targets = targets
 
     def _n_hidden_states(self) -> int:
