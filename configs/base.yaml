@@ -112,6 +112,9 @@ training:
   max_grad_norm: 1.0
   precision: auto           # auto | fp32 | fp16 | bf16
   num_workers: 2
+  grad_checkpointing: null  # tinh lai kich hoat luc backward thay vi giu chung: giam bo nho
+                            # kich hoat khoang sqrt(so tang), doi lai cham hon ~30%. Can cho
+                            # model 7B tren T4; model nho thi khong can.
   single_gpu: null          # null/false = dung MOI GPU nhin thay (DataParallel); true = chi 1.
                             # Voi nhieu GPU, batch_size la TONG chia deu cho chung. Head
                             # sparse_moe tu dong quay ve 1 GPU: DataParallel chay forward tren

@@ -49,6 +49,7 @@ class Trainer:
         n_gpu = torch.cuda.device_count() if self.device.type == "cuda" else 0
         if n_gpu < 2 or self.t.get("single_gpu"):
             return self.model
+        forced = self.t.get("single_gpu") is False     # explicit false overrides the size guard
         # DataParallel runs forward on replicas, so anything a head records on itself as a side
         # effect is written to a replica and thrown away -- self.model.aux_loss would stay at its
         # initial 0.0 forever. For a sparse MoE head that silently removes the load-balancing
@@ -57,6 +58,19 @@ class Trainer:
         if getattr(self.model.head, "aux_loss", None) is not None:
             self.log.info(f"co {n_gpu} GPU nhung head la sparse_moe -> chay 1 GPU. DataParallel "
                           f"se lam mat aux_loss (router sup ve 1 expert ma khong bao loi).")
+            return self.model
+        # DataParallel keeps the master weights *and* a replica on device 0, so it doubles the
+        # weight footprint exactly where memory is tightest -- fp16 under DataParallel costs the
+        # same there as fp32 on one GPU, which is how sarvam-1 kept OOMing after the dtype fix.
+        # It also re-broadcasts every parameter each step, which for gigabytes of weights is
+        # likely slower than not splitting at all. Worth it for a 240M encoder, not for a 2.4B
+        # decoder.
+        n_par = sum(p.numel() for p in self.model.parameters())
+        if n_par > 1e9 and not forced:
+            self.log.info(f"co {n_gpu} GPU nhung model {n_par / 1e9:.1f}B -> chay 1 GPU. "
+                          f"DataParallel giu ca ban chinh lan ban sao tren GPU 0 "
+                          f"({2 * n_par * 2 / 1e9:.1f} GB fp16) va sao chep lai moi buoc. "
+                          f"Dat training.single_gpu=false neu van muon chia.")
             return self.model
         gathered = self.t["batch_size"] // n_gpu
         self.log.info(f"DataParallel tren {n_gpu} GPU -- batch {self.t['batch_size']} chia thanh "
@@ -72,6 +86,21 @@ class Trainer:
         has_val = valid_df is not None and len(valid_df) > 0
         dl_va = (make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False)
                  if has_val else None)
+
+        if t.get("grad_checkpointing"):
+            # Recompute activations in the backward pass instead of keeping them. Roughly a
+            # sqrt(depth) cut in activation memory for about 30% more time -- the trade that
+            # makes a 7B fit where it otherwise will not. enable_input_require_grads is needed
+            # because with a frozen LoRA base the block inputs carry no grad_fn, and
+            # checkpointing then has nothing to recompute through.
+            bb = getattr(self.model, "backbone", None)
+            if bb is not None and hasattr(bb, "gradient_checkpointing_enable"):
+                if hasattr(bb, "enable_input_require_grads"):
+                    bb.enable_input_require_grads()
+                bb.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                self.log.info("gradient checkpointing: BAT (it bo nho hon, cham hon ~30%)")
+            else:
+                self.log.info("training.grad_checkpointing: backbone khong ho tro -> bo qua")
 
         pg = self.model.param_groups(t["lr"], t.get("head_lr"), t["weight_decay"], t.get("llrd"),
                                      t.get("layer_mix_lr"))

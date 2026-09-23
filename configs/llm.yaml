@@ -47,6 +47,12 @@ training:
   early_stopping_patience: 4
   batch_size: 8
   grad_accum: 4                  # effective 32, same as the encoder runs
+  # DataParallel is skipped automatically above 1B parameters: it keeps the master weights and a
+  # replica on device 0, so fp16 under it costs what fp32 costs on one GPU -- which is how this
+  # kept OOMing after the dtype fix. Measured budget on one T4 at batch 8, len 96:
+  #   weights 4.82 GB + LoRA/AdamW 0.38 + activations 2.30 + context 0.6  =  ~8.1 of 14.56 GB
+  # For a 7B, add model.load_in_4bit and training.grad_checkpointing.
+  grad_checkpointing: null
   llrd: null                     # LoRA already restricts what moves; decaying it too is double
 checkpoint:
   save: none
