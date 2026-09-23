@@ -166,6 +166,7 @@ print(subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, tex
 code('''!pip -q install ftfy sentencepiece tiktoken
 # Chi can khi chay configs/llm.yaml (LLM giai ma + LoRA):
 # !pip -q install peft bitsandbytes accelerate
+# !pip -q uninstall -y torchao    # Kaggle co torchao 0.10 ma peft doi >0.16; khong dung toi no
 !nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 import torch, transformers
 print("torch", torch.__version__, "| transformers", transformers.__version__,

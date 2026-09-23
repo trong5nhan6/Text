@@ -120,9 +120,23 @@ class TransformerClassifier(nn.Module):
                              f"dat model.lora.target_modules bang tay")
         if self.quantized:
             self.backbone = prepare_model_for_kbit_training(self.backbone)
-        self.backbone = get_peft_model(self.backbone, LoraConfig(
-            r=cfg.get("r", 16), lora_alpha=cfg.get("alpha", 32),
-            lora_dropout=cfg.get("dropout", 0.05), bias="none", target_modules=targets))
+        try:
+            self.backbone = get_peft_model(self.backbone, LoraConfig(
+                r=cfg.get("r", 16), lora_alpha=cfg.get("alpha", 32),
+                lora_dropout=cfg.get("dropout", 0.05), bias="none", target_modules=targets))
+        except ImportError as e:
+            # peft runs a dispatcher per optional backend while injecting adapters, and its
+            # torchao check raises instead of returning False when the installed torchao is
+            # older than it wants. Kaggle ships 0.10.0. Nothing here uses torchao, so removing
+            # it makes the check return False cleanly. The raw error names neither peft nor the
+            # fix, so translate it.
+            if "torchao" not in str(e):
+                raise
+            raise SystemExit(" | ".join([
+                f"peft xung dot voi torchao co san tren may nay ({e})",
+                "khong co gi trong pipeline dung torchao",
+                "go no di la xong:  pip uninstall -y torchao",
+                "hoac nang cap:  pip install -U 'torchao>=0.16'"]))
         self.lora_targets = targets
 
     def _n_hidden_states(self) -> int:
