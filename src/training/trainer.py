@@ -9,6 +9,7 @@ from transformers import get_linear_schedule_with_warmup
 
 from src.data.dataset import make_loader
 from src.evaluation.metrics import compute_metrics
+from src.training.regularizers import EMA, FGM
 
 
 def resolve_precision(name: str, device: torch.device):
@@ -117,6 +118,21 @@ class Trainer:
         # Balanced routing gives aux == 1.0, total collapse onto one expert gives aux == n_experts.
         # Logged every epoch because a collapsed router is invisible in the macro-F1 alone.
         aux_w = t.get("moe_aux_weight", 0.0) or 0.0
+
+        fgm = FGM(self.model, t["fgm"]) if t.get("fgm") else None
+        if fgm is not None and not fgm.armed:
+            # freeze_embeddings and LoRA both leave the embeddings frozen, and FGM has nothing to
+            # perturb then. Say so: a run that looks adversarially trained but is not would be
+            # compared against one that is.
+            self.log.info("training.fgm: khong co embedding nao nhan gradient (freeze_embeddings "
+                          "hoac LoRA) -> FGM khong lam gi. Bo qua.")
+            fgm = None
+        elif fgm is not None:
+            self.log.info(f"FGM eps={t['fgm']} tren {len(fgm.params)} tensor embedding "
+                          f"(moi buoc chay 2 lan forward)")
+        ema = EMA(self.model, t["ema"]) if t.get("ema") else None
+        if ema is not None:
+            self.log.info(f"EMA decay={t['ema']} tren {len(ema.shadow)} tensor")
         best = {"f1": -1.0, "epoch": 0, "state": None, "pred": None}
         history, bad = [], 0
         for ep in range(1, t["epochs"] + 1):
@@ -143,12 +159,30 @@ class Trainer:
                 loss = loss / t["grad_accum"]
                 scaler.scale(loss).backward()
                 total += loss.item() * t["grad_accum"]
+                if fgm is not None:
+                    # The attack direction comes from the gradient just computed. It is scaled by
+                    # the GradScaler, but FGM normalises per tensor so the scale cancels.
+                    fgm.attack()
+                    with torch.autocast(device_type=self.device.type,
+                                        dtype=self.amp_dtype or torch.float32,
+                                        enabled=self.amp_dtype is not None):
+                        adv = self.net(**batch)
+                    adv_loss = self.loss_fn(adv.float(), y)
+                    if aux_w:
+                        adv_loss = adv_loss + aux_w * self.model.aux_loss
+                    scaler.scale(adv_loss / t["grad_accum"]).backward()
+                    fgm.restore()
                 if (i + 1) % t["grad_accum"] == 0 or i + 1 == len(dl_tr):
                     scaler.unscale_(opt)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), t["max_grad_norm"])
                     scaler.step(opt); scaler.update(); sch.step()
                     opt.zero_grad(set_to_none=True)
+                    if ema is not None:
+                        ema.update(self.model)
 
+            # Evaluate the averaged weights, so what the score describes is what gets kept.
+            if ema is not None:
+                ema.swap_in(self.model)
             p_va = predict_proba(self.net, dl_va, self.device, self.amp_dtype) if has_val else None
             m = compute_metrics(valid_df.y, p_va.argmax(1)) if has_val else {}
             aux_avg = aux_sum / len(dl_tr) if aux_w else None
@@ -158,6 +192,8 @@ class Trainer:
                             "train_accuracy": round(tm["accuracy"], 4),
                             **({"moe_aux": round(aux_avg, 4)} if aux_w else {}), **m})
             improved = has_val and m["macro_f1"] > best["f1"]
+            if ema is not None and not improved:
+                ema.swap_out(self.model)      # keep training from the live trajectory
             self.log.info(f"ep {ep}/{t['epochs']} loss {total / len(dl_tr):.4f} "
                           f"| train F1 {tm['macro_f1']:.4f} acc {tm['accuracy']:.4f} "
                           + (f"| eval F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} " if has_val
@@ -171,6 +207,8 @@ class Trainer:
                 bad = 0
                 best = {"f1": m["macro_f1"], "epoch": ep, "pred": p_va,
                         "state": {k: v.detach().to("cpu", copy=True) for k, v in self.model.state_dict().items()}}
+                if ema is not None:
+                    ema.swap_out(self.model)  # state_dict captured above already holds the EMA
             else:
                 bad += 1
                 if bad >= patience:

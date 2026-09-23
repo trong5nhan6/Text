@@ -88,7 +88,8 @@ class TransformerClassifier(nn.Module):
     def __init__(self, backbone_name: str, num_labels: int, pooling: str = "cls",
                  dropout: float = 0.1, backbone_config=None,
                  unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
-                 layers=None, load_in_4bit=False, lora=None, dtype=None):
+                 layers=None, load_in_4bit=False, lora=None, dtype=None,
+                 multisample_dropout=None):
         super().__init__()
         self.name = backbone_name        # needed before self.meta exists, e.g. by _apply_lora
         self.quantized = bool(load_in_4bit)
@@ -123,6 +124,7 @@ class TransformerClassifier(nn.Module):
             self.backbone = AutoModel.from_config(backbone_config).float()
         if lora:
             self._apply_lora(lora)
+        self.n_dropout = max(1, int(multisample_dropout or 1))   # read by meta just below
         head_cfg = dict(head_cfg or {"head": "linear"})
         hidden = self.backbone.config.hidden_size
         n_hs = self._n_hidden_states()
@@ -135,7 +137,7 @@ class TransformerClassifier(nn.Module):
             self.layer_weights = nn.Parameter(torch.zeros(n_hs))
         self.meta = {"backbone_name": backbone_name, "num_labels": num_labels,
                      "pooling": pooling, "dropout": dropout, "head_cfg": head_cfg,
-                     "layers": self.layers}
+                     "layers": self.layers, "multisample_dropout": self.n_dropout}
         self.pooling = pooling
         self.dropout = nn.Dropout(dropout)
         # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
@@ -320,6 +322,12 @@ class TransformerClassifier(nn.Module):
             pooled = h[torch.arange(h.size(0), device=h.device), idx]
         else:
             pooled = h[:, 0]
+        if self.n_dropout > 1 and self.training:
+            # Multi-sample dropout (Inoue, 2019): average the head over several dropout masks of
+            # the same pooled vector. It lowers the variance of each update at roughly no cost --
+            # only the head runs again, not the encoder -- and needs no extra data. Training only:
+            # at eval dropout is off, so the masks would be identical and the average a no-op.
+            return sum(self.head(self.dropout(pooled)) for _ in range(self.n_dropout)) / self.n_dropout
         return self.head(self.dropout(pooled))
 
     @property
@@ -416,7 +424,8 @@ class TransformerClassifier(nn.Module):
         # .get: checkpoints written before model.head existed carry no head_cfg and are linear.
         model = cls(meta["backbone_name"], meta["num_labels"], meta["pooling"], meta["dropout"],
                     backbone_config=bcfg, head_cfg=meta.get("head_cfg"),
-                    layers=meta.get("layers"))
+                    layers=meta.get("layers"),
+                    multisample_dropout=meta.get("multisample_dropout"))
         sd = torch.load(ckpt_dir / "model.pt", map_location=map_location)
         model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in sd.items()})
         return model, meta

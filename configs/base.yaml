@@ -54,6 +54,9 @@ model:
                             # so nhan gradient; nen LoRA thi no chi nhan doi bo nho vo ich --
                             # sarvam-1 la 9,64 GB fp32 so voi 4,82 fp16, ma T4 co 14,56.
   dropout: 0.1
+  multisample_dropout: null # null/1 = nhu cu. 4-8 = chay head qua nhieu mat na dropout roi
+                            # trung binh logit. Gan nhu mien phi: chi head chay lai, khong phai
+                            # encoder. Chi tac dung luc train.
   # Partial fine-tuning. null keeps today's behaviour (everything trains).
   #   4 -> only the last 4 transformer blocks (+ the head and the norms above them)
   #   0 -> the whole backbone frozen, head only (linear probing)
@@ -127,6 +130,17 @@ training:
                             # and the router then collapses onto one expert within a few hundred
                             # steps -- which shows up as a mediocre score, never as an error.
   label_smoothing: 0.0
+  # Chong overfit. Moi ho model thu o day deu overfit giong nhau: train F1 len 0,98 trong khi
+  # eval tut tu 0,80 xuong 0,76. Trong so mac dinh (dropout 0,1 + weight_decay 0,01) la tat ca
+  # nhung gi dang chong lai no.
+  fgm: null                 # adversarial training: 1.0 la buoc chuan. Nhieu loan embedding theo
+                            # huong gradient roi chay lai -> model dung tren CA MOT VUNG chu
+                            # khong chi mot diem. Tra gia: moi buoc chay 2 lan forward.
+                            # KHONG dung duoc khi freeze_embeddings hoac LoRA (embedding dong
+                            # bang thi khong co gi de nhieu loan) -- trainer se bao va bo qua.
+  ema: null                 # trung binh truot cua trong so, 0.999 la chuan. Gan nhu mien phi.
+                            # Epoch cuoi cua SGD tren du lieu it la nay quanh cuc tieu; trung
+                            # binh cac vi tri do tong quat hoa tot hon bat ky vi tri nao.
   early_stopping_patience: 3   # >= epochs on purpose: run the full schedule so the LR anneals,
                               # and keep the best epoch's weights. Stopping early would cut the
                               # anneal short, which is where most of the gain is.

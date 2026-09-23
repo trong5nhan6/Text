@@ -30,7 +30,8 @@ def build_model(cfg, num_labels: int):
                                  freeze_embeddings=m.get("freeze_embeddings"),
                                  head_cfg=head_config(m), layers=m.get("layers"),
                                  load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"),
-                                 dtype=m.get("dtype"))
+                                 dtype=m.get("dtype"),
+                                 multisample_dropout=m.get("multisample_dropout"))
 
 
 def load_from_checkpoint(ckpt_dir):
