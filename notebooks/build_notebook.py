@@ -42,7 +42,7 @@ KNOBS = [
     ("training.label_smoothing", "ap dung cho ca ce, wce va focal"),
     ("training.moe_aux_weight", "CHI sparse_moe: trong so load-balancing; 0 -> router sup ve 1 expert"),
     ("--- du lieu ---", None),
-    ("data.text_type", "null/latin = chu Latin | kn = chu Kannada | both = ca hai"),
+    ("data.text_type", "latin | kn = chu Kannada | en = ban dich may | both = latin+kn"),
     ("data.tta", "CHI transformer: infer ca 2 chu viet roi trung binh (tfidf se bi tu choi)"),
     ("data.max_len", "Religion / Geo-political dai hon, hay bi cat o 96"),
     ("data.use_valdataset", "false = train 100% du lieu, KHONG cham diem duoc -> chi cho ban nop cuoi"),

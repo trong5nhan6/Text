@@ -45,7 +45,10 @@ def split_rows(train, use_val: bool = True):
     return train[train.is_val == 0], train[train.is_val == 1]
 
 
-TEXT_COLUMNS = {"latin": ["text"], "kn": ["text_kn"], "both": ["text", "text_kn"]}
+# data.text_type -> which column(s) the model reads. "en" is short for English, matching "kn"
+# for Kannada; "both" stays Latin+Kannada, the pair that shares a language.
+TEXT_COLUMNS = {"latin": ["text"], "kn": ["text_kn"], "en": ["text_en"],
+                "both": ["text", "text_kn"]}
 
 
 def text_columns(cfg):
@@ -57,12 +60,15 @@ def text_columns(cfg):
 
 
 def infer_columns(cfg):
-    """Which views to average over at prediction time. data.tta uses both scripts regardless of
-    what the model trained on; without it, prediction uses the training view."""
+    """Which views to average over at prediction time. Without data.tta, several training columns
+    collapse to the Latin original and a single one is used as-is. With tta, the Latin original
+    and the selected view are both predicted and averaged -- so text_type=latin makes tta a
+    no-op, there being no second view; substituting text_kn there would be a different
+    experiment, quietly run under the name of this one."""
     cols = text_columns(cfg)
     if not cfg.get("data", {}).get("tta"):
-        return ["text"] if cols == ["text", "text_kn"] else cols
-    return ["text", "text_kn"]
+        return ["text"] if len(cols) > 1 else cols
+    return list(dict.fromkeys(["text", *cols]))
 
 
 def swap_views(df, cols):

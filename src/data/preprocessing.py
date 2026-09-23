@@ -3,12 +3,12 @@ Text cleaning + one fixed train/eval split.
 
   python -m src.data.preprocessing                # uses configs/base.yaml paths
 
-Writes {processed_dir}/{task}_train.csv (id, text, text_kn, label, group, y, is_val),
+Writes {processed_dir}/{task}_train.csv (id, text, text_kn, text_en, label, group, y, is_val),
 {task}_val.csv and, when a test file exists in raw_dir, {task}_test.csv,
 plus {task}_split.json recording how the split was made.
 
-`text_kn` is the same comment in Kannada script, looked up in data/xlit_kn.json; the column
-is simply absent when that cache is not there.
+`text_kn` is the same comment in Kannada script (data/xlit_kn.json) and `text_en` its English
+machine translation (data/mt_en.json); each column is simply absent when its cache is not there.
 
 `is_val` is the whole scheme: 0 = the fit slice, 1 = the held-out slice
 (data.val_ratio, stratified by label). Every model fits on is_val == 0 and is
@@ -98,12 +98,39 @@ def add_transliteration(df, log=print):
     return df
 
 
+def add_translation(df, log=print):
+    """Add a `text_en` column: the same comment machine-translated to English, from
+    data/mt_en.json (built once on Kaggle -- see notebooks/build_mt_cache.ipynb).
+
+    Same contract as add_transliteration: a column, never a replacement, and skipped silently
+    when the cache is absent.
+
+    Read the translations before trusting this view. Measured on a 12-comment sample: NLLB
+    sanitises or literalises slurs (`Dagar` -> "dagger"), hallucinates (`Husulimaga`, a slur, ->
+    "What is the meaning of life?"), and 2.4% of the full cache degenerates into repetition. MT
+    destroys exactly the surface features this task is decided on, so treat `text_en` as an
+    ablation arm, not as an improvement.
+    """
+    from src.data.translate import load_cache, translate
+    cache = load_cache()
+    if not cache:
+        log("  data/mt_en.json khong co -> bo qua cot text_en")
+        return df
+    out, miss = translate(df.text.tolist(), cache=cache)
+    after = "text_kn" if "text_kn" in df.columns else "text"
+    df.insert(df.columns.get_loc(after) + 1, "text_en", out)
+    log(f"  text_en: {len(df) - miss}/{len(df)} tra duoc trong cache"
+        + (f", {miss} cau thieu -> giu nguyen ban goc" if miss else ""))
+    return df
+
+
 def code_fingerprint() -> str:
     """Hash of the functions that decide what lands in data/processed. Without it, editing
     clean_text leaves a stale data/processed in place and training silently continues on the
     old text -- val_ratio and split_seed alone cannot notice that."""
     src = "".join(inspect.getsource(f)
-                  for f in (clean_text, dedup_key, read_inputs, add_transliteration, prepare_task))
+                  for f in (clean_text, dedup_key, read_inputs, add_transliteration,
+                            add_translation, prepare_task))
     # join the lines back with nothing: the hash must not depend on CRLF vs LF, so a
     # checkout on Windows and one on Kaggle agree
     return hashlib.sha256("".join(src.splitlines()).encode()).hexdigest()[:12]
@@ -139,18 +166,18 @@ def prepare_task(task: str, raw_dir, processed_dir, val_ratio=0.1, split_seed=42
     df["is_val"] = 0
     df.loc[va, "is_val"] = 1
 
-    df = add_transliteration(df, log)
+    df = add_translation(add_transliteration(df, log), log)
     df.to_csv(processed_dir / f"{task}_train.csv", index=False)
     json.dump({"val_ratio": val_ratio, "split_seed": split_seed, "code": code_fingerprint()},
               open(processed_dir / f"{task}_split.json", "w"), indent=1)
 
-    val = add_transliteration(read_inputs(_find(raw_dir, spec["val"])), log)
+    val = add_translation(add_transliteration(read_inputs(_find(raw_dir, spec["val"])), log), log)
     val.to_csv(processed_dir / f"{task}_val.csv", index=False)
 
     msg = ""
     tests = sorted(raw_dir.glob(spec["test_glob"])) or sorted(raw_dir.parent.glob(spec["test_glob"]))
     if tests:
-        test = add_transliteration(read_inputs(tests[0]), log)
+        test = add_translation(add_transliteration(read_inputs(tests[0]), log), log)
         test.to_csv(processed_dir / f"{task}_test.csv", index=False)
         msg = f", test={len(test)} ({tests[0].name})"
     n_eval = int(df.is_val.sum())

@@ -16,6 +16,11 @@ data:
   # `text_kn` the same comment in Kannada script (data/xlit_kn.json).
   #   null / latin  only text                        (default)
   #   kn            only text_kn
+  #   en            only text_en -- the machine translation (data/mt_en.json). An ablation arm:
+  #                 NLLB sanitises slurs, literalises them (`Dagar` -> "dagger") and hallucinates
+  #                 (`Husulimaga`, a slur, -> "What is the meaning of life?"), with 2.4% of the
+  #                 cache degenerating into repetition. It destroys the surface features this
+  #                 task turns on, so measure it once rather than expecting a gain.
   #   both          both -- tfidf: one set of features per column, on the same row;
   #                         transformer: the Kannada copy added as extra training rows
   # The run name gains _kn / _both, so the three land in separate results/ folders.
