@@ -141,6 +141,12 @@ class TransformerClassifier(nn.Module):
         # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
         # excludes it from the LLRD ladder by that prefix, and both must keep holding.
         self.head = build_head(head_cfg.get("head"), width, num_labels, head_cfg)
+        # Recorded now, as a plain attribute, because forward needs it and forward also runs
+        # inside DataParallel replicas -- where parameters() yields nothing. replicate() sets
+        # each replica._parameters[key] to None and re-attaches the broadcast tensor with
+        # setattr, so next(self.head.parameters()) raises StopIteration there. A plain attribute
+        # survives, since replicate copies __dict__.
+        self.head_dtype = next(self.head.parameters()).dtype
         self.freeze_summary = self._apply_freezing(unfreeze_last_n_blocks, freeze_embeddings)
 
     # Attention and MLP projections, by the names the Llama/Gemma/Qwen families use. Anything a
@@ -299,7 +305,7 @@ class TransformerClassifier(nn.Module):
         # The head stays fp32 for the classifier's own numerics, so a backbone loaded in fp16
         # (model.dtype) has to be cast up on the way in -- otherwise "mat1 and mat2 must have
         # the same dtype, but got Half and Float". Under autocast this is a no-op.
-        h = h.to(self._head_dtype)
+        h = h.to(self.head_dtype)
         if getattr(self.head, "needs_tokens", False):
             return self.head(h, attention_mask)
         if self.pooling == "mean":
@@ -315,10 +321,6 @@ class TransformerClassifier(nn.Module):
         else:
             pooled = h[:, 0]
         return self.head(self.dropout(pooled))
-
-    @property
-    def _head_dtype(self):
-        return next(self.head.parameters()).dtype
 
     @property
     def aux_loss(self):
