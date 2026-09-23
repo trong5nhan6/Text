@@ -30,6 +30,9 @@ model:
                                  #   Telugu-LLM-Labs/Indic-gemma-2b-finetuned-sft-Navarasa-2.0
                                  #   ai4bharat/Airavata            (7B -> set load_in_4bit: true)
   pooling: last
+  dtype: fp16                    # the LoRA base is frozen, so an fp32 master copy buys nothing
+                                 # and costs double: sarvam-1 is 9.64 GB in fp32, 4.82 in fp16,
+                                 # and a T4 has 14.56 -- fp32 OOMs before the first batch.
   load_in_4bit: null             # true for a 7B on a T4; a 2B fits in fp16 without it
   lora:
     r: 16

@@ -45,7 +45,14 @@ data:
 model:
   type: transformer         # transformer | tfidf
   name: google/muril-base-cased
-  pooling: cls              # cls | mean
+  pooling: cls              # cls | mean | last
+                            # `last` = token cuoi khong phai padding. BAT BUOC cho LLM giai ma:
+                            # attention nhan qua khien vi tri 0 chi thay chinh no, nen `cls` se
+                            # doc token BOS va vut ca cau di -- khong bao loi, chi ra diem thap.
+  dtype: null               # null = nap roi .float() (giu nguyen moi run cu)
+                            # fp16 | bf16: BAT BUOC cho LLM. Ban sao fp32 chi co ich khi trong
+                            # so nhan gradient; nen LoRA thi no chi nhan doi bo nho vo ich --
+                            # sarvam-1 la 9,64 GB fp32 so voi 4,82 fp16, ma T4 co 14,56.
   dropout: 0.1
   # Partial fine-tuning. null keeps today's behaviour (everything trains).
   #   4 -> only the last 4 transformer blocks (+ the head and the norms above them)

@@ -49,6 +49,7 @@ KNOBS = [
     ("--- model ---", None),
     ("model.name", "DE len MOI config trong CONFIGS -> chi bo # khi chay dung 1 config"),
     ("model.pooling", "cls | mean | last  (LLM giai ma BAT BUOC dung last)"),
+    ("model.dtype", "null = fp32 nhu cu | fp16/bf16: BAT BUOC cho LLM, fp32 se OOM"),
     ("model.dropout", None),
     ("model.unfreeze_last_n_blocks", "null = train tat ca | 4 = chi 4 khoi cuoi | 0 = chi head"),
     ("model.freeze_embeddings", "null = theo khoa tren | true | false"),

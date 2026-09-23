@@ -11,6 +11,9 @@ from src.models.heads import build_head
 
 _BLOCK_RE = re.compile(r"^(?P<prefix>.+?)\.(?P<idx>\d+)\.")
 
+# model.dtype. None (the default) keeps the historical behaviour: load, then .float().
+_DTYPES = {"fp32": None, "fp16": torch.float16, "bf16": torch.bfloat16}
+
 
 def block_layout(backbone):
     """-> (container prefix, number of blocks) for the repeated transformer block.
@@ -85,7 +88,7 @@ class TransformerClassifier(nn.Module):
     def __init__(self, backbone_name: str, num_labels: int, pooling: str = "cls",
                  dropout: float = 0.1, backbone_config=None,
                  unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
-                 layers=None, load_in_4bit=False, lora=None):
+                 layers=None, load_in_4bit=False, lora=None, dtype=None):
         super().__init__()
         self.name = backbone_name        # needed before self.meta exists, e.g. by _apply_lora
         self.quantized = bool(load_in_4bit)
@@ -104,7 +107,16 @@ class TransformerClassifier(nn.Module):
             # (mDeBERTa-v3 does) and transformers keeps the checkpoint's dtype, which then
             # meets the fp32 head as "mat1 and mat2 must have the same dtype". AMP wants fp32
             # master weights anyway -- mixed precision is applied by autocast, not by the weights.
-            self.backbone = AutoModel.from_pretrained(backbone_name).float()
+            #
+            # That reasoning holds for an encoder being fully fine-tuned, and breaks for a
+            # frozen LoRA base: those weights never take a gradient, so there is nothing for an
+            # fp32 master copy to accumulate into, and it doubles the footprint for nothing.
+            # sarvam-1 is 9.64 GB in fp32 against 4.82 in fp16, which on a 14.56 GB T4 is the
+            # difference between running and OOM. model.dtype: fp16 says so explicitly.
+            want = _DTYPES[dtype or "fp32"]
+            self.backbone = AutoModel.from_pretrained(backbone_name, dtype=want)
+            if want is None:
+                self.backbone = self.backbone.float()
         else:                                            # inference: architecture only, weights come from ckpt
             # .float() for the same reason, from the other direction: a config saved off an fp16
             # backbone builds an fp16 one, and load_state_dict copies in place, so fp16 would stick.
@@ -284,6 +296,10 @@ class TransformerClassifier(nn.Module):
         # soft_moe aggregates the token axis itself, so it takes the sequence and `pooling` is
         # unused. Every other head takes the pooled vector, with dropout applied here so that
         # `linear` stays exactly what it was.
+        # The head stays fp32 for the classifier's own numerics, so a backbone loaded in fp16
+        # (model.dtype) has to be cast up on the way in -- otherwise "mat1 and mat2 must have
+        # the same dtype, but got Half and Float". Under autocast this is a no-op.
+        h = h.to(self._head_dtype)
         if getattr(self.head, "needs_tokens", False):
             return self.head(h, attention_mask)
         if self.pooling == "mean":
@@ -299,6 +315,10 @@ class TransformerClassifier(nn.Module):
         else:
             pooled = h[:, 0]
         return self.head(self.dropout(pooled))
+
+    @property
+    def _head_dtype(self):
+        return next(self.head.parameters()).dtype
 
     @property
     def aux_loss(self):

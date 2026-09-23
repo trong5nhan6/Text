@@ -29,7 +29,8 @@ def build_model(cfg, num_labels: int):
                                  unfreeze_last_n_blocks=m.get("unfreeze_last_n_blocks"),
                                  freeze_embeddings=m.get("freeze_embeddings"),
                                  head_cfg=head_config(m), layers=m.get("layers"),
-                                 load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"))
+                                 load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"),
+                                 dtype=m.get("dtype"))
 
 
 def load_from_checkpoint(ckpt_dir):
