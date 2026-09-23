@@ -838,18 +838,26 @@ md("""## 3) Fine-tune từ checkpoint vừa thích nghi
 
 Không cần code mới — chỉ trỏ `model.name` vào thư mục vừa lưu. Chạy **cả bản gốc lẫn bản MLM**
 thì mới biết nó có giúp không.""")
-code('''CKPT      = 'checkpoints/mlm/muril-base-cased'
+code('''# (config, checkpoint MLM tuong ung). Them dong moi sau khi da chay pretrain_mlm.py cho model do.
+PAIRS = [
+    ('muril',   'checkpoints/mlm/muril-base-cased'),
+  # ('roberta', 'checkpoints/mlm/xlm-roberta-base'),
+  # ('cnerg_muril', 'checkpoints/mlm/kannada-codemixed-abusive-MuRIL'),
+]
 FT_EPOCHS = 6     # so epoch khi FINE-TUNE -- KHAC voi MLM_EPOCHS o tren (cai do la cua MLM).
                   # base.yaml dang de 20; doi gia tri thi BAT BUOC co suffix, nen no nam trong SUF.
-SUF       = f'_e{FT_EPOCHS}'
+SUF = f'_e{FT_EPOCHS}'
 # patience = epochs tuc TAT early stopping: trainer van giu epoch tot nhat, con lich LR duoc
 # anneal het. Voi epochs=20 thi model dat dinh o epoch ~5 luc LR con ~83% -- phi doan anneal.
 FT = f'--set training.epochs={FT_EPOCHS} training.early_stopping_patience={FT_EPOCHS}'
 
-for t in ('a', 'b'):
-    print("=" * 70)
-    !python train.py --config configs/muril.yaml --task {t} {FT} --run_suffix {SUF}
-    !python train.py --config configs/muril.yaml --task {t} {FT} model.name={CKPT} --run_suffix {SUF}_mlm''')
+# Ten thu muc TU PHAN BIET: run_name gan them '_mlm' khi model.name bi ghi de, nen ban goc va
+# ban MLM khong bao gio dung chung mot thu muc, va khong can them --run_suffix bang tay.
+for cfg, ckpt in PAIRS:
+    for t in ('a', 'b'):
+        print("=" * 70)
+        !python train.py --config configs/{cfg}.yaml --task {t} {FT} --run_suffix {SUF}
+        !python train.py --config configs/{cfg}.yaml --task {t} {FT} model.name={ckpt} --run_suffix {SUF}''')
 
 code('''import pandas as pd
 d = pd.read_csv('results/metrics.csv')

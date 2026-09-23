@@ -1,5 +1,6 @@
 """YAML config loading with `_base_` inheritance and `key.sub=value` CLI overrides."""
 import copy
+import re
 from pathlib import Path
 
 import yaml
@@ -47,6 +48,9 @@ def load_config(path, overrides=(), **top_level) -> dict:
         path = ROOT / path
     cfg = _load(path)
     cfg["config_name"] = path.stem
+    # Remembered before the overrides run, so run_name() can tell an overridden checkpoint from
+    # the one the config file names and tag the run directory accordingly.
+    cfg["_config_model_name"] = cfg.get("model", {}).get("name")
     for o in overrides or ():
         k, v = o.split("=", 1)
         set_by_dotted(cfg, k.strip(), _parse_value(v))
@@ -73,6 +77,29 @@ def text_suffix(cfg: dict) -> str:
     return ("" if tt in (None, "latin") else f"_{tt}") + ("_tta" if d.get("tta") else "")
 
 
+_TAG_SKIP = {"checkpoints", "results", "models", ".", ".."}
+
+
+def model_tag(cfg: dict) -> str:
+    """A short tag for model.name when --set overrode what the config file asked for.
+
+    Without it, `--config muril.yaml --set model.name=checkpoints/mlm/muril-base-cased` lands in
+    results/{task}/muril_ce_s42 -- the same directory as the plain MuRIL run. train.py would
+    refuse it (the signatures differ), so nothing is overwritten, but a loop over several configs
+    would stop on the error instead of producing both runs. The tag makes the two names differ by
+    themselves: muril_ce_s42 and muril_ce_s42_mlm.
+
+    Prefers the parent directory when it carries the meaning (checkpoints/**mlm**/x -> "mlm") and
+    falls back to the basename otherwise.
+    """
+    name, was = cfg.get("model", {}).get("name"), cfg.get("_config_model_name")
+    if not name or not was or name == was:
+        return ""
+    parts = [p for p in str(name).replace("\\", "/").rstrip("/").split("/") if p]
+    tag = parts[-2] if len(parts) >= 2 and parts[-2] not in _TAG_SKIP else parts[-1]
+    return "_" + re.sub(r"[^A-Za-z0-9]+", "-", tag).strip("-").lower()[:20]
+
+
 def run_name(cfg: dict) -> str:
     """<config>_<loss>_s<seed> (tfidf: <config>_<clf>), plus an optional --run_suffix.
     The suffix exists so a batch of runs with changed hyper-parameters can keep the
@@ -84,7 +111,7 @@ def run_name(cfg: dict) -> str:
     # _full is automatic: a model fitted on 100% of the rows must never land in the same
     # directory as one fitted on 90%, because only the latter has an eval.npy to compare.
     full = "" if cfg.get("data", {}).get("use_valdataset") is not False else "_full"
-    return base + text_suffix(cfg) + full + (cfg.get("run_suffix") or "")
+    return base + text_suffix(cfg) + model_tag(cfg) + full + (cfg.get("run_suffix") or "")
 
 
 def dump(cfg: dict, path):
@@ -93,7 +120,10 @@ def dump(cfg: dict, path):
 
 
 # keys that do not change the model's results -> ignored when checking a resumed run
-_VOLATILE = {"paths", "run_name", "run_suffix", "config_name"}
+# _config_model_name only feeds run_name; it is bookkeeping about where model.name came from,
+# not something the trained weights depend on. Leaving it in the signature would make every run
+# finished before it existed look like a config change and be refused.
+_VOLATILE = {"paths", "run_name", "run_suffix", "config_name", "_config_model_name"}
 
 
 def _drop_none(node):
@@ -110,10 +140,29 @@ def training_signature(cfg: dict) -> dict:
     model does not read, or unrelated edits to base.yaml would invalidate finished runs."""
     sig = _drop_none(copy.deepcopy({k: v for k, v in cfg.items() if k not in _VOLATILE}))
     sig.pop("checkpoint", None)                          # saving weights cannot change them
-    if sig.get("model", {}).get("type") == "tfidf":
+    m, t = sig.get("model", {}), sig.get("training", {})
+
+    # Options an inactive feature leaves unread. Without this, adding model.head defaulting to
+    # "linear" and its five moe_* companions changed the signature of every run finished before
+    # the MoE heads existed -- including the TF-IDF ones, which never look at a head at all --
+    # and train.py refused to re-run any of them.
+    if m.get("head", "linear") == "linear":
+        m.pop("head", None)
+    if m.get("head") != "sparse_moe":
+        m.pop("moe_top_k", None)
+        t.pop("moe_aux_weight", None)
+    if m.get("head") != "soft_moe":
+        m.pop("moe_slots", None)
+    if "head" not in m:                                  # linear reads none of them
+        for k in ("moe_experts", "moe_expert_dim", "moe_dropout"):
+            m.pop(k, None)
+    if m.get("layers") != "mix":
+        t.pop("layer_mix_lr", None)
+
+    if m.get("type") == "tfidf":
         sig.pop("training", None)                        # the transformer block is unused here
         sig.get("data", {}).pop("max_len", None)         # tokenizer-only setting
         return sig
-    sig.get("training", {}).pop("num_workers", None)
-    sig.get("training", {}).pop("eval_batch_size", None)
+    t.pop("num_workers", None)
+    t.pop("eval_batch_size", None)
     return sig
