@@ -80,7 +80,7 @@ KNOBS = [
 
 # Knobs rendered uncommented, i.e. already in OVERRIDES. They sit at their base.yaml defaults, so
 # the cell reports "khong doi gi" until one is edited -- then RUN_SUFFIX becomes mandatory.
-ACTIVE = {"model.hybrid", "model.hybrid_max_features", "model.hybrid_phonetic",
+ACTIVE = {"model.head", "model.mlp_dims", "model.mlp_dropout", "model.hybrid", "model.hybrid_max_features", "model.hybrid_phonetic",
           "model.hybrid_dim", "model.hybrid_dropout", "model.hybrid_lr"}
 
 
@@ -127,7 +127,9 @@ def _default_of(k):
     return node
 
 changed = {k: v for k, v in OVERRIDES.items() if _default_of(k) != v}
-ARGS = " ".join(f"{k}={v}" for k, v in OVERRIDES.items())
+# lists without spaces: "[512, 128]" would reach the shell as two arguments
+_fmt = lambda v: str(v).replace(" ", "") if isinstance(v, (list, tuple)) else v
+ARGS = " ".join(f"{k}={_fmt(v)}" for k, v in OVERRIDES.items())
 ARGS = (f"--set {ARGS}" if ARGS else "") + (f" --run_suffix {RUN_SUFFIX}" if RUN_SUFFIX else "")
 
 print("them vao lenh train:", ARGS or "(khong co, dung mac dinh)")
@@ -250,6 +252,31 @@ for n, (c, t, tt) in enumerate(combos, 1):
 print("")
 print(f"xong {len(combos)} run trong {time.time() - t0:.0f}s")''')
 
+md("""**TF-IDF + MLP** (`configs/tfidf_mlp.yaml`, tên run `tfidf_mlp`). Cùng đặc trưng với các run
+trên, nhưng classifier là mạng MLP (sklearn) thay vì model tuyến tính.
+
+> **Chậm:** khoảng 4–8 phút *mỗi* giá trị alpha (3 giá trị) trên CPU, so với ~10 giây của `lr`.
+> Đo ở máy local, task b held-out: **0,627** (alpha 1e-2), thấp hơn `lr` 0,649 — nhưng vẫn có thể
+> có ích trong blend vì nó sai khác kiểu. Đặt `RUN_MLP = False` để bỏ qua.""")
+code('''import time
+RUN_MLP    = True
+MLP_TASKS  = ['a', 'b']
+MLP_SET    = {                     # de trong = dung dung configs/tfidf_mlp.yaml
+    # 'model.mlp_hidden':  [256],   # cac tang an, vd [64] | [512, 128]
+    # 'model.param_grid':  [1e-4, 1e-3, 1e-2],   # luoi alpha (L2); diem dang tang theo alpha
+    # 'model.max_features': 50000,  # tran so dac trung char -> quyet dinh bo nho lop dau
+}
+MLP_SUFFIX = ''                    # BAT BUOC dat (vd '_h64') khi MLP_SET khac mac dinh
+
+if RUN_MLP:
+    _set = " ".join(f"{k}={str(v).replace(' ', '')}" for k, v in MLP_SET.items())
+    _args = (f"--set {_set}" if _set else "") + (f" --run_suffix {MLP_SUFFIX}" if MLP_SUFFIX else "")
+    t0 = time.time()
+    for t in MLP_TASKS:
+        print("-" * 72); print(f"tfidf_mlp | task = {t} | +{time.time() - t0:.0f}s"); print("-" * 72, flush=True)
+        !python train.py --config configs/tfidf_mlp.yaml --task {t} {_args}
+    print(f"xong trong {(time.time() - t0) / 60:.1f} phut")''')
+
 md("""**Bảng tổng kết + blend ngay** (macro-F1 trên lát held-out; blend dùng greedy forward selection).
 
 > `--tag blend_ml` ghi vào `results/{task}/_blend_ml/`, **tách khỏi** `_blend/` của mục 4.
@@ -263,12 +290,7 @@ display(d[d.run.str.startswith('tfidf')][['task', 'run', 'macro_f1', 'accuracy',
 !python evaluate.py --task a --optimize --tag blend_ml
 !python evaluate.py --task b --optimize --tag blend_ml''')
 
-code('''# TF-IDF + MLP (configs/tfidf_mlp.yaml, ten run tfidf_mlp). CHAM: ~4-8 phut MOI gia tri alpha
-# (3 gia tri) tren CPU, khac han ~10s cua cac clf tuyen tinh. Sua mlp_hidden / max_features /
-# param_grid trong configs/tfidf_mlp.yaml, hoac qua --set:
-# !python train.py --config configs/tfidf_mlp.yaml --task b
-# !python train.py --config configs/tfidf_mlp.yaml --task b --set "model.mlp_hidden=[512,128]" --run_suffix _h512
-# Dò tham số mịn hơn quanh giá trị vừa chọn (nhớ --run_suffix, nếu không script từ chối chạy):
+code('''# Dò tham số mịn hơn quanh giá trị vừa chọn (nhớ --run_suffix, nếu không script từ chối chạy):
 # !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge "model.param_grid=[1,2,3,5,8]" --run_suffix _fine
 # Calibration sigmoid cho svm/ridge (chua co predict_proba that) — cham 5x, do tren du lieu nay KHONG giup:
 # !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge model.calibrate=true --run_suffix _cal''')
