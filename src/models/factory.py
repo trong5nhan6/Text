@@ -21,17 +21,35 @@ def build_tokenizer(cfg_or_name):
     return tok
 
 
-def build_model(cfg, num_labels: int):
+def build_featurizer(cfg, texts):
+    """model.hybrid=tfidf -> a TfidfFeaturizer fitted on `texts` (the fit slice); else None."""
+    m = cfg["model"]
+    kind = m.get("hybrid")
+    if not kind:
+        return None
+    if kind != "tfidf":
+        raise ValueError(f"model.hybrid={kind!r}; expected null or tfidf")
+    from src.models.hybrid import TfidfFeaturizer
+    return TfidfFeaturizer(m.get("hybrid_max_features", 20000),
+                           m.get("hybrid_phonetic", True)).fit(texts)
+
+
+def build_model(cfg, num_labels: int, featurizer=None):
     m = cfg["model"]
     if m["type"] != "transformer":
         raise ValueError(f"build_model only handles transformers, got {m['type']} (tfidf -> src.models.tfidf)")
-    return TransformerClassifier(m["name"], num_labels, m.get("pooling", "cls"), m.get("dropout", 0.1),
-                                 unfreeze_last_n_blocks=m.get("unfreeze_last_n_blocks"),
-                                 freeze_embeddings=m.get("freeze_embeddings"),
-                                 head_cfg=head_config(m), layers=m.get("layers"),
-                                 load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"),
-                                 dtype=m.get("dtype"),
-                                 multisample_dropout=m.get("multisample_dropout"))
+    hybrid = None if featurizer is None else {
+        "in_dim": featurizer.dim, "dim": m.get("hybrid_dim", 256),
+        "dropout": m.get("hybrid_dropout", 0.3), "lr": m.get("hybrid_lr", 1e-3)}
+    model = TransformerClassifier(m["name"], num_labels, m.get("pooling", "cls"), m.get("dropout", 0.1),
+                                  unfreeze_last_n_blocks=m.get("unfreeze_last_n_blocks"),
+                                  freeze_embeddings=m.get("freeze_embeddings"),
+                                  head_cfg=head_config(m), layers=m.get("layers"),
+                                  load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"),
+                                  dtype=m.get("dtype"),
+                                  multisample_dropout=m.get("multisample_dropout"), hybrid=hybrid)
+    model.featurizer = featurizer
+    return model
 
 
 def load_from_checkpoint(ckpt_dir):

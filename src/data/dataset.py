@@ -104,24 +104,29 @@ class TextDataset(Dataset):
 
 
 class Collator:
-    def __init__(self, tokenizer, max_len: int):
-        self.tok, self.max_len = tokenizer, max_len
+    def __init__(self, tokenizer, max_len: int, featurizer=None):
+        self.tok, self.max_len, self.featurizer = tokenizer, max_len, featurizer
 
     def __call__(self, batch):
-        enc = self.tok([b[0] for b in batch], truncation=True, max_length=self.max_len,
+        texts = [b[0] for b in batch]
+        enc = self.tok(texts, truncation=True, max_length=self.max_len,
                        padding=True, return_tensors="pt")
+        if self.featurizer is not None:
+            # model.hybrid: the TF-IDF vector of the same texts, built per batch so nothing
+            # dataset-sized is ever densified. Rides along as the `tfidf` kwarg of forward().
+            enc["tfidf"] = torch.from_numpy(self.featurizer.to_dense(texts))
         if batch[0][1] is not None:
             enc["labels"] = torch.tensor([b[1] for b in batch], dtype=torch.long)
         return enc
 
 
-def make_loader(texts, labels, tokenizer, cfg, train: bool):
+def make_loader(texts, labels, tokenizer, cfg, train: bool, featurizer=None):
     t = cfg["training"]
     return DataLoader(
         TextDataset(texts, labels),
         batch_size=t["batch_size"] if train else t["eval_batch_size"],
         shuffle=train,
-        collate_fn=Collator(tokenizer, cfg["data"]["max_len"]),
+        collate_fn=Collator(tokenizer, cfg["data"]["max_len"], featurizer),
         num_workers=t.get("num_workers", 2),
         pin_memory=torch.cuda.is_available(),
     )

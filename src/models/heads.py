@@ -1,4 +1,4 @@
-"""Classification heads: plain linear, sparse MoE (top-k routed), soft MoE (token-level).
+"""Classification heads: plain linear, MLP, sparse MoE (top-k routed), soft MoE (token-level).
 
 Chosen by `model.head`. The default `linear` is what every finished run used, and it stays
 byte-for-byte what it was -- the other two are additions, not replacements.
@@ -30,6 +30,39 @@ class LinearHead(nn.Module):
 
     def forward(self, x, attention_mask=None):
         return self.fc(x)
+
+
+class MLPHead(nn.Module):
+    """Pooled vector -> [Linear -> GELU -> Dropout] per entry of `dims` -> Linear to the labels.
+
+    The case for it is the hybrid (model.hybrid=tfidf): there the head's input is the encoder
+    state concatenated with a projected TF-IDF vector, and a linear head can only add the two up.
+    A hidden layer lets it condition one on the other -- trust the n-grams when a slur is spelt
+    some way the encoder shreds, the context when there is no slur at all. On the plain encoder
+    it is the same size warning as the MoE heads: [512] on MuRIL is ~397k parameters against
+    4,614 for linear.
+    """
+
+    needs_tokens = False
+
+    def __init__(self, hidden: int, num_labels: int, dims=(512,), dropout: float = 0.2, **_):
+        super().__init__()
+        dims = [dims] if isinstance(dims, int) else list(dims or [])
+        if not dims or any(int(d) < 1 for d in dims):
+            raise ValueError(f"model.mlp_dims must be a non-empty list of positive widths, got {dims!r}")
+        layers, width = [], hidden
+        for d in dims:
+            layers += [nn.Linear(width, int(d)), nn.GELU(), nn.Dropout(dropout)]
+            width = int(d)
+        self.body = nn.Sequential(*layers)
+        self.fc = nn.Linear(width, num_labels)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=0.02)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x, attention_mask=None):
+        return self.fc(self.body(x))
 
 
 class SparseMoEHead(nn.Module):
@@ -141,15 +174,18 @@ class SoftMoEHead(nn.Module):
         return (out * m).sum(1) / m.sum(1).clamp(min=1e-6)
 
 
-HEADS = {"linear": LinearHead, "sparse_moe": SparseMoEHead, "soft_moe": SoftMoEHead}
+HEADS = {"linear": LinearHead, "mlp": MLPHead, "sparse_moe": SparseMoEHead, "soft_moe": SoftMoEHead}
 
 
 def build_head(kind, hidden: int, num_labels: int, cfg=None) -> nn.Module:
-    """`cfg` is the model config block; only the moe_* keys are read."""
+    """`cfg` is the model config block; only the moe_* and mlp_* keys are read."""
     kind = kind or "linear"
     if kind not in HEADS:
         raise ValueError(f"unknown model.head {kind!r}; expected one of {sorted(HEADS)}")
     c = cfg or {}
+    if kind == "mlp":
+        return MLPHead(hidden, num_labels, dims=c.get("mlp_dims", [512]),
+                       dropout=c.get("mlp_dropout", 0.2))
     return HEADS[kind](hidden, num_labels,
                        experts=c.get("moe_experts", 4), expert_dim=c.get("moe_expert_dim", 64),
                        top_k=c.get("moe_top_k", 2), slots=c.get("moe_slots", 1),
@@ -161,6 +197,6 @@ def head_config(cfg) -> dict:
     rebuilds the same head. Only the keys the selected head actually reads, so switching from
     sparse to soft does not leave a stale top_k in the record."""
     kind = cfg.get("head") or "linear"
-    keys = {"linear": (), "sparse_moe": ("moe_experts", "moe_expert_dim", "moe_top_k", "moe_dropout"),
+    keys = {"linear": (), "mlp": ("mlp_dims", "mlp_dropout"), "sparse_moe": ("moe_experts", "moe_expert_dim", "moe_top_k", "moe_dropout"),
             "soft_moe": ("moe_experts", "moe_expert_dim", "moe_slots", "moe_dropout")}[kind]
     return {"head": kind, **{k: cfg[k] for k in keys if k in cfg}}

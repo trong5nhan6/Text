@@ -106,12 +106,18 @@ def run_name(cfg: dict) -> str:
     informative default name instead of being renamed one by one."""
     if cfg.get("run_name"):
         return cfg["run_name"]
-    base = (f"{cfg['config_name']}_{cfg['model'].get('clf', 'lr')}" if cfg["model"]["type"] == "tfidf"
-            else f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}")
+    if cfg["model"]["type"] == "tfidf":
+        clf = cfg["model"].get("clf", "lr")
+        # tfidf_mlp.yaml with clf mlp -> tfidf_mlp, not tfidf_mlp_mlp
+        base = cfg["config_name"] if cfg["config_name"].endswith(f"_{clf}") else f"{cfg['config_name']}_{clf}"
+    else:
+        base = f"{cfg['config_name']}_{resolve_loss(cfg)}_s{cfg['seed']}"
     # _full is automatic: a model fitted on 100% of the rows must never land in the same
     # directory as one fitted on 90%, because only the latter has an eval.npy to compare.
     full = "" if cfg.get("data", {}).get("use_valdataset") is not False else "_full"
-    return base + text_suffix(cfg) + model_tag(cfg) + full + (cfg.get("run_suffix") or "")
+    # _hyb: the hybrid is a different model, and must not share a folder with its plain encoder
+    hyb = "_hyb" if cfg["model"].get("hybrid") and cfg["model"]["type"] != "tfidf" else ""
+    return base + text_suffix(cfg) + model_tag(cfg) + hyb + full + (cfg.get("run_suffix") or "")
 
 
 def dump(cfg: dict, path):
@@ -155,6 +161,13 @@ def training_signature(cfg: dict) -> dict:
         m.pop("moe_slots", None)
     if "head" not in m:                                  # linear reads none of them
         for k in ("moe_experts", "moe_expert_dim", "moe_dropout"):
+            m.pop(k, None)
+    if m.get("head") != "mlp":
+        m.pop("mlp_dims", None)
+        m.pop("mlp_dropout", None)
+    if not m.get("hybrid"):                              # same for the hybrid branch's knobs
+        for k in ("hybrid_dim", "hybrid_dropout", "hybrid_lr", "hybrid_max_features",
+                  "hybrid_phonetic"):
             m.pop(k, None)
     if m.get("layers") != "mix":
         t.pop("layer_mix_lr", None)

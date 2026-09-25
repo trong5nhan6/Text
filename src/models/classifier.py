@@ -89,7 +89,7 @@ class TransformerClassifier(nn.Module):
                  dropout: float = 0.1, backbone_config=None,
                  unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
                  layers=None, load_in_4bit=False, lora=None, dtype=None,
-                 multisample_dropout=None):
+                 multisample_dropout=None, hybrid=None):
         super().__init__()
         self.name = backbone_name        # needed before self.meta exists, e.g. by _apply_lora
         self.quantized = bool(load_in_4bit)
@@ -135,9 +135,28 @@ class TransformerClassifier(nn.Module):
             # One logit per hidden state, softmaxed at use. 13 parameters on a base model.
             # Zeros -> a uniform mix at initialisation, so training starts from the average.
             self.layer_weights = nn.Parameter(torch.zeros(n_hs))
+        # model.hybrid: a TF-IDF branch projected to hybrid["dim"] and concatenated to the pooled
+        # state. {"in_dim", "dim", "dropout"}; in_dim is the fitted featurizer's width, so it is
+        # only known once the fit slice has been seen -- train.py fills it in before building.
+        self.hybrid = dict(hybrid) if hybrid else None
+        # Set by train.py / load(): the fitted TfidfFeaturizer. A plain attribute, not a module,
+        # and read by the Trainer to build the loaders.
+        self.featurizer = None
+        if self.hybrid:
+            if head_cfg.get("head") == "soft_moe":
+                raise SystemExit("model.hybrid khong di chung voi head soft_moe: soft_moe doc chuoi "
+                                 "token, khong co vector pooled nao de ghep nhanh TF-IDF vao.")
+            # Heavy input dropout: the projection has in_dim x dim weights (~80k x 256 = 20M) fed
+            # by 2.8k-5.7k rows, and a sparse input it can memorise. Dropout on the input is what
+            # an n-gram model's L2 penalty does in tfidf.py.
+            self.tfidf_proj = nn.Sequential(nn.Dropout(self.hybrid.get("dropout", 0.3)),
+                                            nn.Linear(self.hybrid["in_dim"], self.hybrid["dim"]),
+                                            nn.GELU())
+            width += self.hybrid["dim"]
         self.meta = {"backbone_name": backbone_name, "num_labels": num_labels,
                      "pooling": pooling, "dropout": dropout, "head_cfg": head_cfg,
-                     "layers": self.layers, "multisample_dropout": self.n_dropout}
+                     "layers": self.layers, "multisample_dropout": self.n_dropout,
+                     "hybrid": self.hybrid}
         self.pooling = pooling
         self.dropout = nn.Dropout(dropout)
         # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
@@ -291,7 +310,7 @@ class TransformerClassifier(nn.Module):
                      f"({100 * trainable / total:.1f}%)")
         return " | ".join(parts)
 
-    def forward(self, input_ids, attention_mask, token_type_ids=None, **_):
+    def forward(self, input_ids, attention_mask, token_type_ids=None, tfidf=None, **_):
         kw = {"input_ids": input_ids, "attention_mask": attention_mask}
         if token_type_ids is not None:
             kw["token_type_ids"] = token_type_ids
@@ -322,6 +341,11 @@ class TransformerClassifier(nn.Module):
             pooled = h[torch.arange(h.size(0), device=h.device), idx]
         else:
             pooled = h[:, 0]
+        if self.hybrid:
+            if tfidf is None:
+                raise RuntimeError("model.hybrid=tfidf nhung batch khong co `tfidf`: loader phai "
+                                   "duoc tao voi featurizer (model.featurizer).")
+            pooled = torch.cat([pooled, self.tfidf_proj(tfidf.to(self.head_dtype))], -1)
         if self.n_dropout > 1 and self.training:
             # Multi-sample dropout (Inoue, 2019): average the head over several dropout masks of
             # the same pooled vector. It lowers the variance of each update at roughly no cost --
@@ -366,7 +390,7 @@ class TransformerClassifier(nn.Module):
             return n_blocks + 1
 
         trainable = [(n, p) for n, p in self.named_parameters()
-                     if p.requires_grad and not n.startswith("head.")]
+                     if p.requires_grad and not n.startswith(("head.", "tfidf_proj."))]
         # The exponent is measured from the topmost depth that actually has parameters, not from
         # n_blocks+1: BertModel has nothing above its last block (its pooler is frozen here), so a
         # fixed ceiling would leave that rung empty and shift the whole ladder down one notch --
@@ -390,6 +414,11 @@ class TransformerClassifier(nn.Module):
                 key, p_lr, wd = ("mix", 0.0), mix_lr or head_lr or lr, 0.0
             elif n.startswith("head."):
                 key, p_lr = ("head", wd), head_lr or lr
+            elif n.startswith("tfidf_proj."):
+                # Randomly initialised like the head, and fed sparse inputs of ~0.1 whose weights
+                # each see a gradient only when their n-gram occurs: 1e-4 barely moves them in
+                # six epochs, so the branch gets its own, larger rate (model.hybrid.lr).
+                key, p_lr = ("hybrid", wd), (self.hybrid or {}).get("lr") or head_lr or lr
             elif llrd:
                 d = depth(n)
                 key, p_lr = (d, wd), lr * llrd ** (top - d)
@@ -414,6 +443,8 @@ class TransformerClassifier(nn.Module):
         self.backbone.config.save_pretrained(out_dir / "backbone")
         if tokenizer is not None:
             tokenizer.save_pretrained(out_dir / "tokenizer")
+        if self.featurizer is not None:
+            self.featurizer.save(out_dir / "tfidf.pkl")
         json.dump({**self.meta, **(extra or {})}, open(out_dir / "meta.json", "w"), indent=1)
 
     @classmethod
@@ -425,7 +456,11 @@ class TransformerClassifier(nn.Module):
         model = cls(meta["backbone_name"], meta["num_labels"], meta["pooling"], meta["dropout"],
                     backbone_config=bcfg, head_cfg=meta.get("head_cfg"),
                     layers=meta.get("layers"),
-                    multisample_dropout=meta.get("multisample_dropout"))
+                    multisample_dropout=meta.get("multisample_dropout"),
+                    hybrid=meta.get("hybrid"))
         sd = torch.load(ckpt_dir / "model.pt", map_location=map_location)
         model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in sd.items()})
+        if model.hybrid:
+            from src.models.hybrid import TfidfFeaturizer
+            model.featurizer = TfidfFeaturizer.load(ckpt_dir / "tfidf.pkl")
         return model, meta

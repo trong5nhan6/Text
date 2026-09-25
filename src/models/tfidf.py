@@ -6,6 +6,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, RidgeClassifier, SGDClassifier
 from sklearn.naive_bayes import ComplementNB
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.svm import LinearSVC
 
@@ -20,6 +21,7 @@ DEFAULT_GRIDS = {
     "ridge": [0.1, 0.5, 1, 3, 10],
     "cnb":   [0.01, 0.05, 0.1, 0.3, 1],
     "sgd":   [1e-6, 1e-5, 1e-4],
+    "mlp":   [1e-4, 1e-3, 1e-2],          # L2 penalty (alpha) of the MLP
 }
 # classifiers with no predict_proba: without calibration their scores go through a softmax
 # of the decision function, which is monotone (argmax unchanged) but on an arbitrary scale --
@@ -60,6 +62,17 @@ def build_estimator(kind: str, param: float, balanced: bool, mcfg: dict, seed: i
         est = RidgeClassifier(alpha=param, class_weight=cw)
     elif kind == "cnb":
         est = ComplementNB(alpha=param)          # has its own imbalance handling; ignores class_weight
+    elif kind == "mlp":
+        # A hidden layer over the n-grams: the linear models above can only add feature weights
+        # up, this can learn that two n-grams mean something together. Early stopping on 10% of
+        # the fit slice picks the epoch count; the held-out slice is never seen. No class_weight
+        # in sklearn's MLP -- `balanced` goes in as sample weights instead (see fit_and_score).
+        est = MLPClassifier(hidden_layer_sizes=tuple(mcfg.get("mlp_hidden") or [256]),
+                            alpha=param, batch_size=mcfg.get("mlp_batch_size", 64),
+                            learning_rate_init=mcfg.get("mlp_lr", 1e-3),
+                            max_iter=mcfg.get("mlp_max_iter", 100), early_stopping=True,
+                            validation_fraction=0.1, n_iter_no_change=mcfg.get("mlp_patience", 5),
+                            random_state=seed)
     elif kind == "sgd":
         est = SGDClassifier(loss="log_loss", penalty="elasticnet", alpha=param,
                             l1_ratio=mcfg.get("l1_ratio", 0.15), max_iter=3000,
@@ -73,6 +86,12 @@ def build_estimator(kind: str, param: float, balanced: bool, mcfg: dict, seed: i
     if calibrate:
         est = CalibratedClassifierCV(est, method="sigmoid", cv=5)
     return est
+
+
+def _mlp_sample_weight(y):
+    """sklearn's MLP has no class_weight; `balanced` becomes n / (k * count[class]) per row."""
+    counts = np.bincount(y)
+    return (len(y) / (len(counts) * counts))[y]
 
 
 def build_tfidf(mcfg: dict, param: float, balanced: bool, seed: int = 42, columns=("text",)):
@@ -128,7 +147,17 @@ def fit_and_score(cfg, train, val, test, n_labels, log=print):
 
     best = None
     for param in grid:
-        pipe = build_tfidf(mcfg, param, balanced, cfg.get("seed", 42), cols).fit(fit[cols], fit.y)
+        pipe = build_tfidf(mcfg, param, balanced, cfg.get("seed", 42), cols)
+        fit_kw = {}
+        if kind == "mlp" and balanced:
+            # sample_weight reached MLPClassifier.fit only in recent sklearn; an older one would
+            # raise TypeError here. Fall back to unweighted and say so.
+            import inspect
+            if "sample_weight" in inspect.signature(MLPClassifier.fit).parameters:
+                fit_kw["mlpclassifier__sample_weight"] = _mlp_sample_weight(fit.y.to_numpy())
+            elif param == grid[0]:
+                log("  note: sklearn nay khong co sample_weight cho MLP -> train khong can bang lop")
+        pipe.fit(fit[cols], fit.y, **fit_kw)
         p_eval = None if len(ev) == 0 else _proba(pipe, ev[cols])
         m = {"macro_f1": float("nan"), "accuracy": float("nan")} if p_eval is None else             compute_metrics(ev.y, p_eval.argmax(1))
         if p_eval is None:

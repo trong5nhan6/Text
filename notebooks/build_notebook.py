@@ -58,16 +58,30 @@ KNOBS = [
     ("model.unfreeze_last_n_blocks", "null = train tat ca | 4 = chi 4 khoi cuoi | 0 = chi head"),
     ("model.freeze_embeddings", "null = theo khoa tren | true | false"),
     ("model.layers", "null = tang cuoi | [2,12] = noi 2 tang | mix = tong co trong so hoc duoc"),
-    ("model.head", "linear | sparse_moe | soft_moe  (soft_moe bo qua model.pooling)"),
+    ("model.head", "linear | mlp | sparse_moe | soft_moe  (soft_moe bo qua model.pooling)"),
+    ("model.mlp_dims", "CHI head=mlp: cac tang an, vd [512] | [512, 128]"),
+    ("model.mlp_dropout", "CHI head=mlp: dropout sau moi tang an"),
     ("model.moe_experts", "so expert; head linear chi co 4.614 tham so, MoE E=4 d=64 la ~201k"),
     ("model.moe_expert_dim", None),
     ("model.moe_top_k", "CHI sparse_moe: so expert hoat dong moi mau (1 = Switch routing)"),
     ("model.moe_slots", "CHI soft_moe: so slot moi expert"),
     ("model.moe_dropout", "ben trong moi expert"),
+    ("model.hybrid", "null | tfidf = ghep TF-IDF (+phien am) vao vector pooled; ten run them _hyb"),
+    ("model.hybrid_max_features", "CHI hybrid: SO CHIEU TF-IDF moi vectoriser; tong = 4x (2x neu tat phien am)"),
+    ("model.hybrid_phonetic", "CHI hybrid: true = them view phien am (4 vectoriser), false = 2"),
+    ("model.hybrid_dim", "CHI hybrid: so chieu chieu vector TF-IDF xuong truoc khi ghep"),
+    ("model.hybrid_dropout", "CHI hybrid: dropout tren vector TF-IDF dau vao"),
+    ("model.hybrid_lr", "CHI hybrid: lr cua nhanh TF-IDF (khoi tao moi, can lon hon head_lr)"),
     ("seed", None),
     ("--- dia ---", None),
     ("checkpoint.save", "best | none   (none tiet kiem ~0.5 GB moi run)"),
 ]
+
+
+# Knobs rendered uncommented, i.e. already in OVERRIDES. They sit at their base.yaml defaults, so
+# the cell reports "khong doi gi" until one is edited -- then RUN_SUFFIX becomes mandatory.
+ACTIVE = {"model.hybrid", "model.hybrid_max_features", "model.hybrid_phonetic",
+          "model.hybrid_dim", "model.hybrid_dropout", "model.hybrid_lr"}
 
 
 def _overrides_cell() -> str:
@@ -89,7 +103,7 @@ def _overrides_cell() -> str:
             continue
         v = default_of(key)
         v = f"'{v}'" if isinstance(v, str) else repr(v)
-        entry = f"    # '{key}':".ljust(width + 8) + f"{v},"
+        entry = (f"      '{key}':" if key in ACTIVE else f"    # '{key}':").ljust(width + 8) + f"{v},"
         lines.append(f"{entry.ljust(width + 20)}# {note}" if note else entry)
     lines.append("}")
     return "\n".join(lines) + """
@@ -249,7 +263,12 @@ display(d[d.run.str.startswith('tfidf')][['task', 'run', 'macro_f1', 'accuracy',
 !python evaluate.py --task a --optimize --tag blend_ml
 !python evaluate.py --task b --optimize --tag blend_ml''')
 
-code('''# Dò tham số mịn hơn quanh giá trị vừa chọn (nhớ --run_suffix, nếu không script từ chối chạy):
+code('''# TF-IDF + MLP (configs/tfidf_mlp.yaml, ten run tfidf_mlp). CHAM: ~4-8 phut MOI gia tri alpha
+# (3 gia tri) tren CPU, khac han ~10s cua cac clf tuyen tinh. Sua mlp_hidden / max_features /
+# param_grid trong configs/tfidf_mlp.yaml, hoac qua --set:
+# !python train.py --config configs/tfidf_mlp.yaml --task b
+# !python train.py --config configs/tfidf_mlp.yaml --task b --set "model.mlp_hidden=[512,128]" --run_suffix _h512
+# Dò tham số mịn hơn quanh giá trị vừa chọn (nhớ --run_suffix, nếu không script từ chối chạy):
 # !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge "model.param_grid=[1,2,3,5,8]" --run_suffix _fine
 # Calibration sigmoid cho svm/ridge (chua co predict_proba that) — cham 5x, do tren du lieu nay KHONG giup:
 # !python train.py --config configs/tfidf.yaml --task b --set model.clf=ridge model.calibrate=true --run_suffix _cal''')

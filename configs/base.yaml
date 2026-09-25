@@ -84,7 +84,21 @@ model:
   # Careful with a single shallow layer: layers: [2] leaves blocks 3-12 with no path to the loss,
   # so they get no gradient and the model is a 2-block transformer paying for 12.
   layers: null
-  head: linear              # linear | sparse_moe | soft_moe
+  head: linear              # linear | mlp | sparse_moe | soft_moe
+  mlp_dims: [512]           # CHI head=mlp: be rong cac tang an, vd [512] hoac [512, 128]
+  mlp_dropout: 0.2          # CHI head=mlp: dropout sau moi tang an
+  # Hybrid: TF-IDF (char 2-5 + word 1-2, of the text and of its phonetic key) chieu xuong
+  # hybrid_dim roi GHEP vao vector pooled truoc head -- mot model, hoc chung, khac voi blend
+  # (trung binh xac suat cua cac model train rieng). Featurizer fit tren lat fit cua run, luu
+  # kem checkpoint (tfidf.pkl). Ten run them _hyb. Chi voi text_type=latin, khong tta.
+  hybrid: null              # null | tfidf
+  hybrid_dim: 256
+  hybrid_dropout: 0.3       # dropout tren vector TF-IDF dau vao: phep chieu co ~80k x 256 trong so
+  hybrid_lr: 1.0e-3         # nhanh moi khoi tao, dau vao thua ~0.1 -> can lr lon hon head_lr
+  hybrid_max_features: 20000   # SO CHIEU TF-IDF: tran cho MOI vectoriser. Co 4 vectoriser
+                               # (char/word x text/phien am) -> tong toi da 4 x gia tri nay
+                               # (80k); 2 x neu hybrid_phonetic=false. null = khong gioi han
+  hybrid_phonetic: true     # them view phien am: +0.002 (a) / +0.013 (b) voi LR, 5-fold
   moe_experts: 4            # both MoE heads
   moe_expert_dim: 64        # hidden width of one expert MLP; 64 -> ~201k, 256 -> ~797k
   moe_top_k: 2              # sparse_moe only: experts active per example (1 = Switch routing)
