@@ -1055,69 +1055,143 @@ print("vocab MLM == vocab cnerg_muril:", tok.get_vocab() == enc.get_vocab())
 print("MLM   :", tok.tokenize("Bajetigu thu nin ajji 😡"))
 print("cnerg :", enc.tokenize("Bajetigu thu nin ajji 😡"), " (cnerg chuyen chu thuong)")''')
 
-md("""## 2) Cấu hình các run
+md("""## 2) Bảng điều khiển
 
-Mọi run dùng chung `COMMON` và đều có hậu tố `SUFFIX`, nên không đè lên run của notebook chính.
-Mỗi dòng trong `RUNS` là một run cho mỗi task:
+**Mọi thứ chỉnh ở MỘT cell dưới đây.** Cell ngay sau nó chỉ in **kế hoạch** (tên run và đầy đủ
+override), không train gì. Xem kế hoạch rồi mới chạy cell train.
 
-| run | ý nghĩa |
-|---|---|
-| `base` | cnerg_muril thuần: mốc để so |
-| `mix` | + trộn bảng muril gốc và MuRIL-MLM, trọng số theo từng token |
-| `mix_g` | như trên, một trọng số chung cho mỗi nguồn |
-| `mlm_enc` | **đối chứng**: dùng thẳng MuRIL-MLM làm encoder (không trộn) |
-| `mix_side` | `mix` + `side_embedding: char+phonetic` |
+Các run được sinh ra:
 
-Bỏ `#` / thêm `#` để chọn run. Chênh lệch dưới ~0,02 macro-F1 là trong mức nhiễu của lát eval.""")
+| run | bật khi | khác mốc ở đâu |
+|---|---|---|
+| `base` | `RUN_BASE = True` | mốc: encoder thuần, không trộn |
+| `mix:<mode>` | mỗi mode trong `MIX_MODES` | + trộn các bảng trong `MIX_SOURCES` |
+| `mlm_enc` | `RUN_MLM_ENC = True` | đối chứng: dùng thẳng MuRIL-MLM làm encoder |
 
-code('''TASKS  = ['a', 'b']
-COMMON = {                                   # ap cho MOI run
-    'training.epochs': 6,
-    'training.early_stopping_patience': 6,   # chay tron lich LR roi giu epoch tot nhat
-    # 'training.loss': 'ce',                 # task b mac dinh focal
-    # 'data.max_len': 128,
-}
-SUFFIX = f"_e{COMMON['training.epochs']}"
-MIX    = "[google/muril-base-cased,checkpoints/mlm/muril-base-cased]"   # KHONG co dau cach
+`SIDE`, `HYBRID` và `HEAD` được áp cho **mọi** run, kể cả `base` và `mlm_enc`. Như vậy các run
+chỉ khác nhau ở phần trộn, và so sánh vẫn công bằng. Chênh lệch dưới ~0,02 macro-F1 là trong
+mức nhiễu của lát eval.""")
 
-RUNS = [   # (ten, config, override rieng)
-    ('base',     'cnerg_muril', {}),
-    ('mix',      'cnerg_muril', {'model.embed_mix': MIX, 'model.embed_mix_mode': 'token'}),
-    ('mix_g',    'cnerg_muril', {'model.embed_mix': MIX, 'model.embed_mix_mode': 'global'}),
-    ('mlm_enc',  'muril',       {'model.name': 'checkpoints/mlm/muril-base-cased'}),
-    # ('mix_side', 'cnerg_muril', {'model.embed_mix': MIX, 'model.side_embedding': 'char+phonetic'}),
-]
-# Khoa khac cua embed_mix (configs/base.yaml): model.embed_mix_lr (mac dinh 1e-3)''')
+code('''# ============================== BANG DIEU KHIEN ==============================
+TASKS = ['a', 'b']                  # 'a' = Hate/Non-Hate, 'b' = 6 nhom doi tuong
 
-code('''import time
-fmt = lambda v: str(v).replace(" ", "")
+# ---- encoder (kiem luon tokenizer) -------------------------------------------------
+ENCODER = 'cnerg_muril'             # ten file trong configs/: cnerg_muril | muril | roberta | cnerg_xlmr ...
+
+# ---- embed_mix: tron bang embedding -----------------------------------------------
+# Phai DUNG CHUNG VOCAB voi ENCODER (khac vocab -> train.py tu choi va giai thich).
+#   voi cnerg_muril / muril:  'google/muril-base-cased', 'checkpoints/mlm/muril-base-cased',
+#                             'Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL' (neu ENCODER khac no)
+#   voi roberta / cnerg_xlmr: 'xlm-roberta-base', 'Hate-speech-CNERG/deoffxlmr-mono-kannada'
+MIX_SOURCES = ['google/muril-base-cased', 'checkpoints/mlm/muril-base-cased']   # [] = khong tron
+MIX_MODES   = ['token', 'global']   # moi mode -> 1 run.  token = trong so rieng moi token | global = chung
+MIX_LR      = 1e-3                  # lr cua router / trong so tron
+
+# ---- ap cho MOI run -----------------------------------------------------------------
+SIDE     = None       # None | 'char' | 'phonetic' | 'char+phonetic'   (vector phu muc tu, gate = 0)
+HYBRID   = None       # None | 'tfidf'                                   (ghep TF-IDF truoc head)
+HEAD     = 'linear'   # 'linear' | 'mlp'
+MLP_DIMS = [512]      # CHI HEAD='mlp'
+
+# ---- huan luyen -------------------------------------------------------------------
+EPOCHS   = 6          # cung la do dai lich LR
+PATIENCE = 6          # >= EPOCHS: chay tron lich roi giu epoch tot nhat
+LR       = 2e-5       # lr cua encoder
+BATCH    = 32         # tong tren moi GPU
+MAX_LEN  = 96         # token; 128 giam 1/2 so cau bi cat (Religion/Geo-political bi cat nhieu nhat)
+LOSS     = 'auto'     # auto (a: ce, b: focal) | ce | wce | focal
+SEED     = 42
+
+# ---- run doi chung ----------------------------------------------------------------
+RUN_BASE    = True    # encoder khong tron -- moc de so
+RUN_MLM_ENC = True    # encoder = checkpoints/mlm/muril-base-cased, khong tron
+
+SUFFIX = None         # None = tu sinh tu cac tham so huan luyen o tren (vd '_e6')
+# ===================================================================================''')
+
+code('''# ---- KE HOACH: dung bang dieu khien -> danh sach run. Khong train gi o day. ----
+import os
+from src.utils.config import load_config, run_name
+
+MLM_DIR = 'checkpoints/mlm/muril-base-cased'
+fmt = lambda v: str(v).replace(" ", "")              # list -> khong co dau cach cho shell
+
+if SUFFIX is None:                                    # chi ghi nhung gi khac mac dinh
+    SUFFIX = f"_e{EPOCHS}"
+    for val, dflt, tag in ((LR, 2e-5, 'lr'), (BATCH, 32, 'bs'), (MAX_LEN, 96, 'len'), (PATIENCE, EPOCHS, 'p')):
+        if val != dflt:
+            SUFFIX += f"_{tag}{val:g}"
+    if HEAD == 'mlp':                                 # side/hybrid tu them _se/_hyb, head thi khong
+        SUFFIX += "_mlp" + "x".join(map(str, MLP_DIMS))
+
+common = {'training.epochs': EPOCHS, 'training.early_stopping_patience': PATIENCE,
+          'training.lr': LR, 'training.batch_size': BATCH, 'data.max_len': MAX_LEN,
+          'training.loss': LOSS, 'model.head': HEAD}
+if HEAD == 'mlp':
+    common['model.mlp_dims'] = MLP_DIMS
+if SIDE:
+    common['model.side_embedding'] = SIDE
+if HYBRID:
+    common['model.hybrid'] = HYBRID
+
+PLAN = []   # (nhan, config, overrides)
+if RUN_BASE:
+    PLAN.append(('base', ENCODER, {}))
+if MIX_SOURCES:
+    for mode in MIX_MODES:
+        PLAN.append((f'mix:{mode}', ENCODER, {'model.embed_mix': MIX_SOURCES,
+                                              'model.embed_mix_mode': mode,
+                                              'model.embed_mix_lr': MIX_LR}))
+if RUN_MLM_ENC:
+    if os.path.isfile(f'{MLM_DIR}/config.json'):
+        PLAN.append(('mlm_enc', 'muril', {'model.name': MLM_DIR}))
+    else:
+        print(f"!! RUN_MLM_ENC bo qua: chua co {MLM_DIR} (chay cell tai MLM o muc 1)")
+if any(MLM_DIR in str(s) for s in MIX_SOURCES) and not os.path.isfile(f'{MLM_DIR}/config.json'):
+    print(f"!! MIX_SOURCES co {MLM_DIR} nhung thu muc chua co -> cac run mix se loi")
+
+JOBS = []
+print(f"SUFFIX = {SUFFIX!r}   |   {len(PLAN)} run x {len(TASKS)} task = {len(PLAN) * len(TASKS)} lan train\\n")
+for label, conf, extra in PLAN:
+    sets = {**common, **extra}
+    for t in TASKS:
+        cfg = load_config(f'configs/{conf}.yaml', [f"{k}={fmt(v)}" for k, v in sets.items()],
+                          task=t, seed=SEED, run_suffix=SUFFIX)
+        JOBS.append((label, conf, t, sets, run_name(cfg)))
+        print(f"  {label:13s} task {t}  ->  {run_name(cfg)}")
+print("\\noverride chung:", {k: v for k, v in common.items()})''')
+
+code('''# ---- TRAIN: chay dung KE HOACH o tren ----
+import time
 t0 = time.time()
-jobs = [(r, t) for r in RUNS for t in TASKS]
-for n, ((name, conf, extra), t) in enumerate(jobs, 1):
-    sets = " ".join(f"{k}={fmt(v)}" for k, v in {**COMMON, **extra}.items())
+for n, (label, conf, t, sets, name) in enumerate(JOBS, 1):
+    args = " ".join(f"{k}={fmt(v)}" for k, v in sets.items())
     print("\\n" + "=" * 72)
-    print(f"[{n}/{len(jobs)}]  {name} | config {conf} | task {t} | +{(time.time() - t0) / 60:.1f} phut")
+    print(f"[{n}/{len(JOBS)}]  {label} | {name} | +{(time.time() - t0) / 60:.1f} phut")
     print("=" * 72, flush=True)
-    !python train.py --config configs/{conf}.yaml --task {t} --set {sets} --run_suffix {SUFFIX}
-print(f"\\nxong {len(jobs)} run trong {(time.time() - t0) / 60:.1f} phut")''')
+    !python train.py --config configs/{conf}.yaml --task {t} --seed {SEED} --set {args} --run_suffix {SUFFIX}
+print(f"\\nxong {len(JOBS)} run trong {(time.time() - t0) / 60:.1f} phut")''')
 
 md("""## 3) Kết quả
 
-Bảng macro-F1 của các run trong notebook này (lọc theo `SUFFIX`), kèm trọng số trộn mà mỗi run
-học được (đọc từ log). Nhớ rằng lát eval nhiễu ±0,02.""")
+macro-F1 của đúng các run trong kế hoạch, kèm trọng số trộn và gate mà mỗi run học được (đọc từ
+log). Nhớ rằng lát eval nhiễu ±0,02.""")
 
-code('''import pandas as pd, glob
+code('''import pandas as pd
+names = {name: label for label, _, _, _, name in JOBS}
 d = pd.read_csv('results/metrics.csv')
-d = d[d.run.str.endswith(SUFFIX)]
-display(d[['task', 'run', 'macro_f1', 'accuracy', 'best_epoch']]
+d = d[d.run.isin(names)].assign(nhan=lambda x: x.run.map(names))
+display(d[['task', 'nhan', 'run', 'macro_f1', 'accuracy', 'best_epoch']]
         .sort_values(['task', 'macro_f1'], ascending=[True, False]))
-for f in sorted(glob.glob(f'logs/*{SUFFIX}.log')):
-    lines = [l.split('| INFO | ')[-1].strip() for l in open(f, encoding='utf-8')
-             if 'embed_mix a[' in l or 'side_gate' in l]
-    if lines:
-        print(f"\\n{f}"); print("\\n".join("  " + l for l in lines))''')
+for label, conf, t, _, name in JOBS:
+    f = f'logs/{t}_{name}.log'
+    if os.path.isfile(f):
+        lines = [l.split('| INFO | ')[-1].strip() for l in open(f, encoding='utf-8')
+                 if 'embed_mix a[' in l or 'side_gate' in l]
+        if lines:
+            print(f"\\n{label} / task {t}:"); print("\\n".join("  " + l for l in lines))''')
 
-code('''# Blend cac run trong notebook nay (trong so toi uu tren lat eval -> lac quan):
+code('''# Blend cac run trong ke hoach (trong so toi uu tren lat eval -> lac quan):
 for t in TASKS:
     runs = " ".join(d[d.task == t].run)
     if runs:
