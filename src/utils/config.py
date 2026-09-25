@@ -117,7 +117,11 @@ def run_name(cfg: dict) -> str:
     full = "" if cfg.get("data", {}).get("use_valdataset") is not False else "_full"
     # _hyb: the hybrid is a different model, and must not share a folder with its plain encoder
     hyb = "_hyb" if cfg["model"].get("hybrid") and cfg["model"]["type"] != "tfidf" else ""
-    return base + text_suffix(cfg) + model_tag(cfg) + hyb + full + (cfg.get("run_suffix") or "")
+    # _se-char / _se-phonetic / _se-char-phonetic: the side embedding is a different model too
+    se = cfg["model"].get("side_embedding") if cfg["model"]["type"] != "tfidf" else None
+    se = f"_se-{se.replace('+', '-')}" if se else ""
+    return (base + text_suffix(cfg) + model_tag(cfg) + hyb + se + full
+            + (cfg.get("run_suffix") or ""))
 
 
 def dump(cfg: dict, path):
@@ -165,6 +169,10 @@ def training_signature(cfg: dict) -> dict:
     if m.get("head") != "mlp":
         m.pop("mlp_dims", None)
         m.pop("mlp_dropout", None)
+    if not m.get("side_embedding"):                      # and for the side embedding's
+        for k in ("side_char_dim", "side_char_filters", "side_key_dim", "side_dropout", "side_lr",
+                  "side_min_count", "side_max_word_len"):
+            m.pop(k, None)
     if not m.get("hybrid"):                              # same for the hybrid branch's knobs
         for k in ("hybrid_dim", "hybrid_dropout", "hybrid_lr", "hybrid_max_features",
                   "hybrid_phonetic"):

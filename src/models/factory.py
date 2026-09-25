@@ -34,21 +34,44 @@ def build_featurizer(cfg, texts):
                            m.get("hybrid_phonetic", True)).fit(texts)
 
 
-def build_model(cfg, num_labels: int, featurizer=None):
+def build_side_vocab(cfg, texts, tokenizer):
+    """model.side_embedding -> a SideVocab fitted on `texts` (the fit slice); else None."""
+    m = cfg["model"]
+    kind = m.get("side_embedding")
+    if not kind:
+        return None
+    if not getattr(tokenizer, "is_fast", False):
+        # word_ids() / word_to_chars() are what line the side vectors up with the subwords, and
+        # only a fast tokenizer has them. CANINE's is not one (and has no subwords to align).
+        raise SystemExit(f"model.side_embedding can tokenizer 'fast' (co word_ids); "
+                         f"{m['name']} khong co.")
+    from src.models.side import SideVocab
+    return SideVocab(kind, m.get("side_min_count", 2), m.get("side_max_word_len", 20)).fit(
+        texts, tokenizer, cfg["data"]["max_len"])
+
+
+def build_model(cfg, num_labels: int, featurizer=None, side_vocab=None):
     m = cfg["model"]
     if m["type"] != "transformer":
         raise ValueError(f"build_model only handles transformers, got {m['type']} (tfidf -> src.models.tfidf)")
     hybrid = None if featurizer is None else {
         "in_dim": featurizer.dim, "dim": m.get("hybrid_dim", 256),
         "dropout": m.get("hybrid_dropout", 0.3), "lr": m.get("hybrid_lr", 1e-3)}
+    side = None if side_vocab is None else {
+        "kind": side_vocab.kind, "n_chars": side_vocab.n_chars, "n_keys": side_vocab.n_keys,
+        "char_dim": m.get("side_char_dim", 32), "char_filters": m.get("side_char_filters", 64),
+        "key_dim": m.get("side_key_dim", 128), "dropout": m.get("side_dropout", 0.1),
+        "lr": m.get("side_lr", 1e-3)}
     model = TransformerClassifier(m["name"], num_labels, m.get("pooling", "cls"), m.get("dropout", 0.1),
                                   unfreeze_last_n_blocks=m.get("unfreeze_last_n_blocks"),
                                   freeze_embeddings=m.get("freeze_embeddings"),
                                   head_cfg=head_config(m), layers=m.get("layers"),
                                   load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"),
                                   dtype=m.get("dtype"),
-                                  multisample_dropout=m.get("multisample_dropout"), hybrid=hybrid)
+                                  multisample_dropout=m.get("multisample_dropout"), hybrid=hybrid,
+                                  side=side)
     model.featurizer = featurizer
+    model.side_vocab = side_vocab
     return model
 
 

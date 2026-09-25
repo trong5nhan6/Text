@@ -72,6 +72,12 @@ KNOBS = [
     ("model.hybrid_dim", "CHI hybrid: so chieu chieu vector TF-IDF xuong truoc khi ghep"),
     ("model.hybrid_dropout", "CHI hybrid: dropout tren vector TF-IDF dau vao"),
     ("model.hybrid_lr", "CHI hybrid: lr cua nhanh TF-IDF (khoi tao moi, can lon hon head_lr)"),
+    ("model.side_embedding", "BAT/TAT: null | char | phonetic | char+phonetic -> tron vao embedding dau vao; ten run them _se-..."),
+    ("model.side_char_dim", "CHI side: so chieu embedding moi ky tu"),
+    ("model.side_char_filters", "CHI side: filter moi do rong CNN (2,3,4,5) -> vector ky tu 4x"),
+    ("model.side_key_dim", "CHI side: so chieu embedding khoa phien am"),
+    ("model.side_min_count", "CHI side: khoa phien am hiem hon -> dung chung UNK"),
+    ("model.side_lr", "CHI side: lr cua nhanh phu + gate"),
     ("seed", None),
     ("--- dia ---", None),
     ("checkpoint.save", "best | none   (none tiet kiem ~0.5 GB moi run)"),
@@ -81,7 +87,9 @@ KNOBS = [
 # Knobs rendered uncommented, i.e. already in OVERRIDES. They sit at their base.yaml defaults, so
 # the cell reports "khong doi gi" until one is edited -- then RUN_SUFFIX becomes mandatory.
 ACTIVE = {"model.head", "model.mlp_dims", "model.mlp_dropout", "model.hybrid", "model.hybrid_max_features", "model.hybrid_phonetic",
-          "model.hybrid_dim", "model.hybrid_dropout", "model.hybrid_lr"}
+          "model.hybrid_dim", "model.hybrid_dropout", "model.hybrid_lr",
+          "model.side_embedding", "model.side_char_dim", "model.side_char_filters",
+          "model.side_key_dim", "model.side_min_count", "model.side_lr"}
 
 
 def _overrides_cell() -> str:
@@ -345,20 +353,24 @@ TASKS   = ['a', 'b']
 # Bien the chay THEM cho moi config (de ['linear'] / [False] = chi ban goc nhu truoc):
 HEADS   = ['linear']      # them 'mlp' -> head MLP (model.mlp_dims trong OVERRIDES), ten run them _mlp
 HYBRID  = [False]         # them True  -> ghep TF-IDF vao vector pooled, ten run them _hyb
+SIDE    = [None]          # them 'char' / 'phonetic' / 'char+phonetic' -> tron embedding phu vao
+                          #   embedding dau vao (gate = 0 luc dau), ten run them _se-<kieu>
 # vd HEADS = ['linear', 'mlp'], HYBRID = [False, True] -> 4 bien the x moi config x moi task
+# None / False = KHONG them gi -> gia tri trong OVERRIDES van co hieu luc
 
 import itertools
-variants = list(itertools.product(HEADS, HYBRID))
-jobs = [(c, t, h, hy) for c in CONFIGS for (h, hy) in variants for t in TASKS]
+variants = list(itertools.product(HEADS, HYBRID, SIDE))
+jobs = [(c, t, h, hy, se) for c in CONFIGS for (h, hy, se) in variants for t in TASKS]
 t0 = time.time()
-for n, (c, t, h, hy) in enumerate(jobs, 1):
-    extra = [f"model.head={h}"] + (["model.hybrid=tfidf"] if hy else [])
+for n, (c, t, h, hy, se) in enumerate(jobs, 1):
+    extra = ([f"model.head={h}"] + (["model.hybrid=tfidf"] if hy else [])
+             + ([f"model.side_embedding={se}"] if se else []))
     # _mlp phan biet voi run head linear; _hyb do train.py tu them khi bat hybrid
     suffix = RUN_SUFFIX + ("_mlp" if h == "mlp" else "")
     cmd = f"{SET_ARGS} --set {' '.join(extra)}" + (f" --run_suffix {suffix}" if suffix else "")
     print("")
     print("=" * 72)
-    print(f"[{n}/{len(jobs)}]  config = {c} | task = {t} | head = {h} | hybrid = {hy}   "
+    print(f"[{n}/{len(jobs)}]  config = {c} | task = {t} | head = {h} | hybrid = {hy} | side = {se}   "
           f"|   {time.strftime('%H:%M:%S')}   |   +{(time.time() - t0) / 60:.1f} phut")
     print("=" * 72, flush=True)
     !python train.py --config configs/{c}.yaml --task {t} {cmd}

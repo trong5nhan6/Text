@@ -91,6 +91,22 @@ model:
   # hybrid_dim roi GHEP vao vector pooled truoc head -- mot model, hoc chung, khac voi blend
   # (trung binh xac suat cua cac model train rieng). Featurizer fit tren lat fit cua run, luu
   # kem checkpoint (tfidf.pkl). Ten run them _hyb. Chi voi text_type=latin, khong tta.
+  # Side embedding: BAT/TAT bang mot khoa. Tron them mot vector muc TU vao embedding dau vao
+  # cua encoder:  e = e_subword + gate * e_side  (gate khoi tao 0 -> buoc dau = model goc).
+  #   null           tat (mac dinh, moi run cu)
+  #   char           CharCNN tren ky tu cua tu (emoji, bien the chinh ta)
+  #   phonetic       embedding cua khoa phien am (thu/thuu/thoo -> 1 dong)
+  #   char+phonetic  ca hai
+  # 1 encoder duy nhat; vector cua tu duoc chep len moi subword cua tu do theo word_ids().
+  # Ten run them _se-<kieu>. Can tokenizer fast (khong dung voi CANINE), text_type=latin, khong tta.
+  side_embedding: null
+  side_char_dim: 32         # CHI side: so chieu embedding moi ky tu
+  side_char_filters: 64     # CHI side: so filter moi do rong CNN (2,3,4,5) -> vector ky tu 4x
+  side_key_dim: 128         # CHI side: so chieu embedding khoa phien am
+  side_min_count: 2         # CHI side: khoa phien am xuat hien it hon so nay -> dung chung dong UNK
+  side_max_word_len: 20     # CHI side: cat tu dai hon so ky tu nay
+  side_dropout: 0.1         # CHI side: dropout truoc phep chieu len hidden
+  side_lr: 1.0e-3           # CHI side: lr cua nhanh phu + gate (khoi tao moi)
   hybrid: null              # null | tfidf
   hybrid_dim: 256
   hybrid_dropout: 0.3       # dropout tren vector TF-IDF dau vao: phep chieu co ~80k x 256 trong so

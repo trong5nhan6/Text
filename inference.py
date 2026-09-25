@@ -38,7 +38,8 @@ def predict_checkpoint_dir(run_ckpt: Path, texts, batch_size=64, precision="auto
     model, tok, meta = load_from_checkpoint(run_ckpt)
     cfg = {"data": {"max_len": meta.get("max_len", 96)},
            "training": {"batch_size": batch_size, "eval_batch_size": batch_size, "num_workers": 2}}
-    dl = make_loader(list(texts), None, tok, cfg, train=False, featurizer=model.featurizer)
+    dl = make_loader(list(texts), None, tok, cfg, train=False, featurizer=model.featurizer,
+                     side=model.side_vocab)
     out = predict_proba(model.to(device), dl, device, resolve_precision(precision, device))
     print(f"  {run_ckpt}: held-out macro-F1 {meta.get('macro_f1')} @ epoch {meta.get('epoch')}")
     return out

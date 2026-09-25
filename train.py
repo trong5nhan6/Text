@@ -70,7 +70,7 @@ def check_run_dir(run_dir: Path, cfg, overwrite, log) -> bool:
 def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     """log: the logger object (Trainer calls log.info itself)."""
     import torch
-    from src.models.factory import build_featurizer, build_model, build_tokenizer
+    from src.models.factory import build_featurizer, build_model, build_side_vocab, build_tokenizer
     from src.training.losses import build_loss
     from src.training.trainer import Trainer
 
@@ -114,7 +114,15 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
                  f"-> {cfg['model'].get('hybrid_dim', 256)} chieu, ghep vao vector pooled")
     log.info(f"tai tokenizer + trong so {cfg['model']['name']} ...")   # quiet: no HF progress bars
     tokenizer = build_tokenizer(cfg)
-    model = build_model(cfg, n_labels, featurizer)
+    side_vocab = None
+    if cfg["model"].get("side_embedding"):
+        # Same reasons as the hybrid: fitted on Latin text, on the fit slice only.
+        if cfg["data"].get("tta") or cols != ["text"]:
+            raise SystemExit("model.side_embedding chi dung voi data.text_type=latin va khong tta.")
+        side_vocab = build_side_vocab(cfg, fit[train_col], tokenizer)
+        log.info(f"side embedding {side_vocab.kind}: {side_vocab.n_chars} ky tu, {side_vocab.n_keys} "
+                 f"khoa phien am (>= {side_vocab.min_count} lan trong lat fit), gate khoi tao = 0")
+    model = build_model(cfg, n_labels, featurizer, side_vocab)
     log.info(f"san sang sau {time.time() - t0:.0f}s")
     log.info(f"freeze: {model.freeze_summary}")
     trainer = Trainer(cfg, model, tokenizer, build_loss(loss_name, cfg["training"], counts), device, log)
@@ -127,6 +135,10 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
         return sum(trainer.predict(df[c]) for c in infer_cols) / len(infer_cols)
 
     single = infer_cols == [train_col]
+    gate = model.side_gate_norm()    # None unless model.side_embedding is on
+    if gate is not None:
+        # 0 would mean the side stream was never used -- worth knowing before crediting it
+        log.info(f"side_gate: trung binh |g| = {gate:.4f} (0 = nhanh phu khong duoc dung)")
     mix = model.layer_mix()          # None unless model.layers == "mix"
     if mix is not None:
         spread = max(mix) - min(mix)

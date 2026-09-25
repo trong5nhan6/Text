@@ -89,7 +89,7 @@ class TransformerClassifier(nn.Module):
                  dropout: float = 0.1, backbone_config=None,
                  unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
                  layers=None, load_in_4bit=False, lora=None, dtype=None,
-                 multisample_dropout=None, hybrid=None):
+                 multisample_dropout=None, hybrid=None, side=None):
         super().__init__()
         self.name = backbone_name        # needed before self.meta exists, e.g. by _apply_lora
         self.quantized = bool(load_in_4bit)
@@ -153,10 +153,23 @@ class TransformerClassifier(nn.Module):
                                             nn.Linear(self.hybrid["in_dim"], self.hybrid["dim"]),
                                             nn.GELU())
             width += self.hybrid["dim"]
+        # model.side_embedding: a word-level side vector mixed into the input embeddings,
+        # e = e_subword + side_gate * e_side, gate at zero (src/models/side.py). `side` carries
+        # the fitted vocab sizes, so like hybrid it is only known once the fit slice was seen.
+        self.side_cfg = dict(side) if side else None
+        self.side_vocab = None                   # set by train.py / load(); read by the Trainer
+        if self.side_cfg:
+            if load_in_4bit or lora:
+                raise SystemExit("model.side_embedding khong di chung voi LoRA / load_in_4bit.")
+            from src.models.side import SideEmbedding
+            self.side = SideEmbedding(self.side_cfg, hidden)
+            # One scale per hidden dimension, starting at 0: step 0 is the pretrained model
+            # exactly, and the gradient reaches the side branch through the gate as it opens.
+            self.side_gate = nn.Parameter(torch.zeros(hidden))
         self.meta = {"backbone_name": backbone_name, "num_labels": num_labels,
                      "pooling": pooling, "dropout": dropout, "head_cfg": head_cfg,
                      "layers": self.layers, "multisample_dropout": self.n_dropout,
-                     "hybrid": self.hybrid}
+                     "hybrid": self.hybrid, "side": self.side_cfg}
         self.pooling = pooling
         self.dropout = nn.Dropout(dropout)
         # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
@@ -235,6 +248,13 @@ class TransformerClassifier(nn.Module):
             return sum(w[i] * h for i, h in enumerate(hidden_states))
         return torch.cat([hidden_states[i] for i in self.layers], dim=-1)
 
+    def side_gate_norm(self):
+        """-> mean |gate| of the side branch, for the log: 0 means the model never used it."""
+        if not self.side_cfg:
+            return None
+        with torch.no_grad():
+            return float(self.side_gate.abs().mean())
+
     def layer_mix(self):
         """-> the learned per-layer weights, for reporting. None unless layers == "mix"."""
         if self.layers != "mix":
@@ -310,8 +330,20 @@ class TransformerClassifier(nn.Module):
                      f"({100 * trainable / total:.1f}%)")
         return " | ".join(parts)
 
-    def forward(self, input_ids, attention_mask, token_type_ids=None, tfidf=None, **_):
+    def forward(self, input_ids, attention_mask, token_type_ids=None, tfidf=None,
+                side_tok2word=None, side_chars=None, side_keys=None, **_):
         kw = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if self.side_cfg:
+            if side_tok2word is None:
+                raise RuntimeError("model.side_embedding bat nhung batch khong co side_*: loader phai "
+                                   "duoc tao voi side=model.side_vocab.")
+            # Mix at the word-embedding lookup and hand the sum over as inputs_embeds: the
+            # backbone then adds its own position / token-type embeddings and LayerNorm on top,
+            # exactly as it does for input_ids.
+            e = self.backbone.get_input_embeddings()(input_ids)
+            side = self.side(side_tok2word, side_chars, side_keys)
+            kw = {"inputs_embeds": e + self.side_gate.to(e.dtype) * side.to(e.dtype),
+                  "attention_mask": attention_mask}
         if token_type_ids is not None:
             kw["token_type_ids"] = token_type_ids
         if self.layers is None:
@@ -390,7 +422,7 @@ class TransformerClassifier(nn.Module):
             return n_blocks + 1
 
         trainable = [(n, p) for n, p in self.named_parameters()
-                     if p.requires_grad and not n.startswith(("head.", "tfidf_proj."))]
+                     if p.requires_grad and not n.startswith(("head.", "tfidf_proj.", "side.", "side_gate"))]
         # The exponent is measured from the topmost depth that actually has parameters, not from
         # n_blocks+1: BertModel has nothing above its last block (its pooler is frozen here), so a
         # fixed ceiling would leave that rung empty and shift the whole ladder down one notch --
@@ -414,6 +446,13 @@ class TransformerClassifier(nn.Module):
                 key, p_lr, wd = ("mix", 0.0), mix_lr or head_lr or lr, 0.0
             elif n.startswith("head."):
                 key, p_lr = ("head", wd), head_lr or lr
+            elif n.startswith(("side.", "side_gate")):
+                # New and randomly initialised like the hybrid branch; the gate in particular
+                # starts at 0 and has to move to matter at all. No weight decay on the gate:
+                # decay would only pull it back to "off".
+                if n == "side_gate":
+                    wd = 0.0
+                key, p_lr = ("side", wd), (self.side_cfg or {}).get("lr") or head_lr or lr
             elif n.startswith("tfidf_proj."):
                 # Randomly initialised like the head, and fed sparse inputs of ~0.1 whose weights
                 # each see a gradient only when their n-gram occurs: 1e-4 barely moves them in
@@ -445,6 +484,8 @@ class TransformerClassifier(nn.Module):
             tokenizer.save_pretrained(out_dir / "tokenizer")
         if self.featurizer is not None:
             self.featurizer.save(out_dir / "tfidf.pkl")
+        if self.side_vocab is not None:
+            self.side_vocab.save(out_dir / "side_vocab.pkl")
         json.dump({**self.meta, **(extra or {})}, open(out_dir / "meta.json", "w"), indent=1)
 
     @classmethod
@@ -457,10 +498,13 @@ class TransformerClassifier(nn.Module):
                     backbone_config=bcfg, head_cfg=meta.get("head_cfg"),
                     layers=meta.get("layers"),
                     multisample_dropout=meta.get("multisample_dropout"),
-                    hybrid=meta.get("hybrid"))
+                    hybrid=meta.get("hybrid"), side=meta.get("side"))
         sd = torch.load(ckpt_dir / "model.pt", map_location=map_location)
         model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in sd.items()})
         if model.hybrid:
             from src.models.hybrid import TfidfFeaturizer
             model.featurizer = TfidfFeaturizer.load(ckpt_dir / "tfidf.pkl")
+        if model.side_cfg:
+            from src.models.side import SideVocab
+            model.side_vocab = SideVocab.load(ckpt_dir / "side_vocab.pkl")
         return model, meta

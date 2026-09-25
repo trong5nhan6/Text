@@ -81,14 +81,15 @@ class Trainer:
     def fit(self, train_df, valid_df):
         t = self.t
         feat = self.model.featurizer          # model.hybrid: TF-IDF of each batch, else None
+        side = self.model.side_vocab          # model.side_embedding: char/key ids per word, else None
         dl_tr = make_loader(train_df.text.tolist(), train_df.y.tolist(), self.tok, self.cfg, train=True,
-                            featurizer=feat)
+                            featurizer=feat, side=side)
         # No held-out slice (data.use_valdataset: false): nothing to score against, so there is
         # no best epoch to keep and no early stopping. The run trains the full schedule and
         # returns its LAST epoch, which is why `epochs` has to be set deliberately in this mode.
         has_val = valid_df is not None and len(valid_df) > 0
         dl_va = (make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False,
-                             featurizer=feat) if has_val else None)
+                             featurizer=feat, side=side) if has_val else None)
 
         if t.get("grad_checkpointing"):
             # Recompute activations in the backward pass instead of keeping them. Roughly a
@@ -231,5 +232,5 @@ class Trainer:
         if texts is None or len(texts) == 0:
             return None
         dl = make_loader(list(texts), None, self.tok, self.cfg, train=False,
-                         featurizer=self.model.featurizer)
+                         featurizer=self.model.featurizer, side=self.model.side_vocab)
         return predict_proba(self.net, dl, self.device, self.amp_dtype)
