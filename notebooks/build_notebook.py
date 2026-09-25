@@ -129,8 +129,9 @@ def _default_of(k):
 changed = {k: v for k, v in OVERRIDES.items() if _default_of(k) != v}
 # lists without spaces: "[512, 128]" would reach the shell as two arguments
 _fmt = lambda v: str(v).replace(" ", "") if isinstance(v, (list, tuple)) else v
-ARGS = " ".join(f"{k}={_fmt(v)}" for k, v in OVERRIDES.items())
-ARGS = (f"--set {ARGS}" if ARGS else "") + (f" --run_suffix {RUN_SUFFIX}" if RUN_SUFFIX else "")
+SET_ARGS = " ".join(f"{k}={_fmt(v)}" for k, v in OVERRIDES.items())
+SET_ARGS = f"--set {SET_ARGS}" if SET_ARGS else ""
+ARGS = SET_ARGS + (f" --run_suffix {RUN_SUFFIX}" if RUN_SUFFIX else "")
 
 print("them vao lenh train:", ARGS or "(khong co, dung mac dinh)")
 if changed:
@@ -234,7 +235,9 @@ Chạy cả năm: mỗi run ~10 giây, và **blend của chúng hơn hẳn model
 thấp nhưng chỉ đồng thuận 73–79% với nhóm tuyến tính nên đóng góp nhiều nhất cho ensemble.""")
 code('''import itertools, time
 
-CLFS       = ['lr', 'svm', 'sgd']       # da bo: 'ridge', 'cnb'
+CLFS       = ['lr', 'svm', 'sgd', 'mlp']   # da bo: 'ridge', 'cnb'
+                                         # 'mlp' = TF-IDF + MLP (configs/tfidf_mlp.yaml), CHAM:
+                                         #   ~4-8 phut MOI gia tri alpha x 3, bo di neu voi
 TASKS_ML   = ['a', 'b']
 TEXT_TYPES = ['latin']        # <- doi o day. them 'kn', 'both' de chay ca ba goc nhin
                               #    latin = chu Latin goc | kn = chu Kannada | both = ca hai
@@ -248,34 +251,12 @@ for n, (c, t, tt) in enumerate(combos, 1):
     print(f"[{n}/{len(combos)}]  clf = {c:6s} |  task = {t}  |  text_type = {tt:6s} |  "
           f"+{time.time() - t0:.0f}s")
     print("-" * 72, flush=True)
-    !python train.py --config configs/tfidf.yaml --task {t} --set model.clf={c} data.text_type={tt}
+    if c == 'mlp':      # its own config: smaller max_features and an alpha grid for the MLP
+        !python train.py --config configs/tfidf_mlp.yaml --task {t} --set data.text_type={tt}
+    else:
+        !python train.py --config configs/tfidf.yaml --task {t} --set model.clf={c} data.text_type={tt}
 print("")
 print(f"xong {len(combos)} run trong {time.time() - t0:.0f}s")''')
-
-md("""**TF-IDF + MLP** (`configs/tfidf_mlp.yaml`, tên run `tfidf_mlp`). Cùng đặc trưng với các run
-trên, nhưng classifier là mạng MLP (sklearn) thay vì model tuyến tính.
-
-> **Chậm:** khoảng 4–8 phút *mỗi* giá trị alpha (3 giá trị) trên CPU, so với ~10 giây của `lr`.
-> Đo ở máy local, task b held-out: **0,627** (alpha 1e-2), thấp hơn `lr` 0,649 — nhưng vẫn có thể
-> có ích trong blend vì nó sai khác kiểu. Đặt `RUN_MLP = False` để bỏ qua.""")
-code('''import time
-RUN_MLP    = True
-MLP_TASKS  = ['a', 'b']
-MLP_SET    = {                     # de trong = dung dung configs/tfidf_mlp.yaml
-    # 'model.mlp_hidden':  [256],   # cac tang an, vd [64] | [512, 128]
-    # 'model.param_grid':  [1e-4, 1e-3, 1e-2],   # luoi alpha (L2); diem dang tang theo alpha
-    # 'model.max_features': 50000,  # tran so dac trung char -> quyet dinh bo nho lop dau
-}
-MLP_SUFFIX = ''                    # BAT BUOC dat (vd '_h64') khi MLP_SET khac mac dinh
-
-if RUN_MLP:
-    _set = " ".join(f"{k}={str(v).replace(' ', '')}" for k, v in MLP_SET.items())
-    _args = (f"--set {_set}" if _set else "") + (f" --run_suffix {MLP_SUFFIX}" if MLP_SUFFIX else "")
-    t0 = time.time()
-    for t in MLP_TASKS:
-        print("-" * 72); print(f"tfidf_mlp | task = {t} | +{time.time() - t0:.0f}s"); print("-" * 72, flush=True)
-        !python train.py --config configs/tfidf_mlp.yaml --task {t} {_args}
-    print(f"xong trong {(time.time() - t0) / 60:.1f} phut")''')
 
 md("""**Bảng tổng kết + blend ngay** (macro-F1 trên lát held-out; blend dùng greedy forward selection).
 
@@ -361,18 +342,28 @@ CONFIGS = ['muril', 'roberta', 'bert', 'cnerg_muril', 'cnerg_xlmr']
 # hay sup ve mot lop tren du lieu nho -- doc history.json truoc khi tin con so cuoi.
 TASKS   = ['a', 'b']
 
+# Bien the chay THEM cho moi config (de ['linear'] / [False] = chi ban goc nhu truoc):
+HEADS   = ['linear']      # them 'mlp' -> head MLP (model.mlp_dims trong OVERRIDES), ten run them _mlp
+HYBRID  = [False]         # them True  -> ghep TF-IDF vao vector pooled, ten run them _hyb
+# vd HEADS = ['linear', 'mlp'], HYBRID = [False, True] -> 4 bien the x moi config x moi task
+
+import itertools
+variants = list(itertools.product(HEADS, HYBRID))
+jobs = [(c, t, h, hy) for c in CONFIGS for (h, hy) in variants for t in TASKS]
 t0 = time.time()
-for i, c in enumerate(CONFIGS):
-    for j, t in enumerate(TASKS):
-        n = i * len(TASKS) + j + 1
-        print("")
-        print("=" * 72)
-        print(f"[{n}/{len(CONFIGS) * len(TASKS)}]  config = {c}   |   task = {t}   "
-              f"|   {time.strftime('%H:%M:%S')}   |   +{(time.time() - t0) / 60:.1f} phut")
-        print("=" * 72, flush=True)
-        !python train.py --config configs/{c}.yaml --task {t} {ARGS}
+for n, (c, t, h, hy) in enumerate(jobs, 1):
+    extra = [f"model.head={h}"] + (["model.hybrid=tfidf"] if hy else [])
+    # _mlp phan biet voi run head linear; _hyb do train.py tu them khi bat hybrid
+    suffix = RUN_SUFFIX + ("_mlp" if h == "mlp" else "")
+    cmd = f"{SET_ARGS} --set {' '.join(extra)}" + (f" --run_suffix {suffix}" if suffix else "")
+    print("")
+    print("=" * 72)
+    print(f"[{n}/{len(jobs)}]  config = {c} | task = {t} | head = {h} | hybrid = {hy}   "
+          f"|   {time.strftime('%H:%M:%S')}   |   +{(time.time() - t0) / 60:.1f} phut")
+    print("=" * 72, flush=True)
+    !python train.py --config configs/{c}.yaml --task {t} {cmd}
 print("")
-print(f"xong {len(CONFIGS) * len(TASKS)} run trong {(time.time() - t0) / 60:.1f} phut")''')
+print(f"xong {len(jobs)} run trong {(time.time() - t0) / 60:.1f} phut")''')
 
 md("""> **Loss:** vòng lặp trên đã dùng đúng loss cho từng task qua `training.loss: auto` —
 > Task A `ce` (nhãn 51/49, không cần bù), Task B **`focal`** (gamma 2 + class weight `sqrt_inv`).
