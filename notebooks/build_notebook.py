@@ -92,6 +92,11 @@ ACTIVE = {"model.head", "model.mlp_dims", "model.mlp_dropout", "model.hybrid", "
           "model.side_key_dim", "model.side_min_count", "model.side_lr"}
 
 
+# Values the notebook ships with instead of the base.yaml default -- choices made in the
+# notebook itself, kept here so rebuilding it does not silently revert them.
+NOTEBOOK_VALUES = {"model.hybrid": "tfidf"}
+
+
 def _overrides_cell() -> str:
     import yaml
     base = yaml.safe_load(open(ROOT / "configs" / "base.yaml", encoding="utf-8"))
@@ -109,7 +114,7 @@ def _overrides_cell() -> str:
         if key.startswith("---"):
             lines.append(f"    # {key}")
             continue
-        v = default_of(key)
+        v = NOTEBOOK_VALUES.get(key, default_of(key))
         v = f"'{v}'" if isinstance(v, str) else repr(v)
         entry = (f"      '{key}':" if key in ACTIVE else f"    # '{key}':").ljust(width + 8) + f"{v},"
         lines.append(f"{entry.ljust(width + 20)}# {note}" if note else entry)
@@ -929,3 +934,202 @@ code('''!cd /kaggle/working/repo && zip -r -q /kaggle/working/mlm_muril.zip chec
 !ls -lh /kaggle/working/mlm_muril.zip''')
 
 write("pretrain_mlm.ipynb")
+
+
+# =====================================================================================
+# =====================================================================================
+#  Notebook 5 -- embedding mix. One tokenizer, several word-embedding tables mixed before
+#  one encoder (model.embed_mix), measured against the plain encoder and against the MLM
+#  encoder itself. Needs the MLM checkpoint from pretrain_mlm.ipynb, fetched from Drive.
+# =====================================================================================
+MLM_DRIVE_ID = "1XgEo2UzdOw8sX4ofd0mmzbOVVhfYnDo7"
+
+md(f"""# Embedding mix — 1 tokenizer · nhiều bảng embedding · 1 encoder
+
+**Settings:** Accelerator = **GPU T4 ×2** · Internet = **On**
+
+```
+"Bajetigu thu nin …"
+      │  tokenizer của ENCODER (1 cái)  → input_ids
+      ├──► E_0 : bảng embedding của encoder (cnerg_muril)            ← vẫn được train
+      ├──► E_1 : bảng của google/muril-base-cased                    ← đóng băng
+      └──► E_2 : bảng của MuRIL sau MLM (checkpoints/mlm/…)           ← đóng băng
+                 e = E_0[id] + Σ a_k · (E_k[id] − E_0[id])      a_k khởi tạo = 0
+      │
+      ▼  + position + LayerNorm → 1 encoder (cnerg_muril, 12 block) → pooling → head
+```
+
+- **`embed_mix_mode: token`**: mỗi token có trọng số `a_k` riêng (router `Linear(768→K)` khởi tạo 0).
+  **`global`**: một trọng số chung cho mỗi nguồn.
+- Nguồn phải **dùng chung vocab** với encoder. MuRIL, cnerg_muril và MuRIL-MLM đều dùng cùng một
+  file vocab (197.285 mục). mBERT/XLM-R bị **từ chối**, vì chỉ khớp ~80% token và phần lệch
+  chính là các từ Kanglish.
+- Log mỗi run in `embed_mix a[nguồn]`: gần **0** nghĩa là nguồn đó không được dùng.
+
+> **Kỳ vọng thực tế.** Đo trước: trên token Kanglish, bảng MuRIL-MLM gần như **trùng** bảng MuRIL
+> gốc (cosine ≈ 0,998). MLM thay đổi chủ yếu **encoder**, không phải bảng. Vì vậy notebook chạy
+> kèm một **run đối chứng dùng thẳng encoder MLM**. Nếu run đó thắng mà mix không thắng, câu trả
+> lời là dùng encoder MLM, không phải trộn bảng.""")
+
+code(f'''import os, subprocess, sys
+
+REPO, BRANCH, WORK = "{REPO}", "{BRANCH}", "/kaggle/working"
+TOKEN = ""
+try:
+    from kaggle_secrets import UserSecretsClient
+    TOKEN = UserSecretsClient().get_secret("GH_TOKEN")
+except Exception:
+    pass
+url = f"https://{{TOKEN + '@' if TOKEN else ''}}github.com/{{REPO}}.git"
+hide = (lambda s: s.replace(TOKEN, "***")) if TOKEN else (lambda s: s)
+
+os.chdir(WORK)
+cmd = (["git", "-C", "repo", "pull", "--ff-only"] if os.path.isdir("repo/.git")
+       else ["git", "clone", "--depth", "1", "-b", BRANCH, url, "repo"])
+r = subprocess.run(cmd, capture_output=True, text=True)
+print(hide((r.stdout + r.stderr).strip()))
+if r.returncode:
+    raise SystemExit("git that bai -- kiem tra Internet = On, repo Public")
+
+os.chdir(f"{{WORK}}/repo"); sys.path.insert(0, os.getcwd())
+print(subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())''')
+
+code('''!pip -q install ftfy sentencepiece gdown
+!nvidia-smi --query-gpu=name,memory.total --format=csv,noheader''')
+
+md("""## 1) Tải checkpoint MLM
+
+File `mlm_muril.zip` (~1,4 GB) do `pretrain_mlm.ipynb` sinh ra, để trên Google Drive (chế độ
+*Anyone with the link*). Bên trong là `checkpoints/mlm/muril-base-cased/` gồm `config.json`
+(BertForMaskedLM, vocab 197.285), `model.safetensors` (fp32, có kèm đầu MLM, `train.py` tự bỏ
+qua), `tokenizer.json` và `tokenizer_config.json`. Giải nén **ở gốc repo** thì đường dẫn khớp
+với các config.
+
+- Đã có thư mục đó thì cell tự bỏ qua, không tải lại.
+- Drive báo *quota exceeded*: tải file về máy, rồi *Add Input ▸ Upload* thành một Kaggle Dataset
+  và đặt `KAGGLE_ZIP` bên dưới trỏ vào nó (hoặc để trống: cell tự tìm `mlm_muril.zip` trong
+  `/kaggle/input`).""")
+
+code(f'''import os, zipfile, glob
+
+MLM_DIR    = "checkpoints/mlm/muril-base-cased"
+DRIVE_ID   = "{MLM_DRIVE_ID}"
+KAGGLE_ZIP = ""        # vd "/kaggle/input/mlm-muril/mlm_muril.zip" neu tai qua Kaggle Dataset
+ZIP        = "/kaggle/working/mlm_muril.zip"
+
+if os.path.isfile(f"{{MLM_DIR}}/model.safetensors"):
+    print("da co", MLM_DIR, "-> bo qua tai")
+else:
+    src = KAGGLE_ZIP or (glob.glob("/kaggle/input/**/mlm_muril.zip", recursive=True) or [None])[0]
+    if src:
+        print("dung zip co san:", src); ZIP = src
+    else:
+        import gdown
+        gdown.download(id=DRIVE_ID, output=ZIP, quiet=False)
+    with zipfile.ZipFile(ZIP) as z:
+        print("\\n".join(f"  {{i.file_size / 1e6:9.1f}} MB  {{i.filename}}" for i in z.infolist()))
+        z.extractall(".")          # -> ./checkpoints/mlm/muril-base-cased/
+    if ZIP.startswith("/kaggle/working/"):
+        os.remove(ZIP)             # 1.4 GB it khong can nua; /kaggle/working gioi han ~20 GB
+!ls -la {{MLM_DIR}}''')
+
+md("""**Kiểm tra checkpoint** (nhanh, không cần GPU): nạp config và tokenizer, so vocab với encoder.
+Tokenizer trong zip được lưu bằng transformers 5. Nếu bản trên Kaggle không đọc được, cell sẽ ghi
+đè bằng tokenizer của `google/muril-base-cased`. Việc này an toàn vì cùng file vocab và cùng
+kiểu giữ chữ hoa/thường; MLM cũng được train bằng chính tokenizer đó.""")
+
+code('''import transformers
+from transformers import AutoConfig, AutoTokenizer
+print("transformers", transformers.__version__)
+cfg = AutoConfig.from_pretrained(MLM_DIR)
+print("config:", cfg.architectures, "vocab", cfg.vocab_size, "hidden", cfg.hidden_size)
+try:
+    tok = AutoTokenizer.from_pretrained(MLM_DIR)
+    tok.tokenize("Bajetigu thu nin ajji")
+except Exception as e:
+    print("tokenizer trong zip khong doc duoc:", str(e)[:150], "\\n-> thay bang google/muril-base-cased")
+    AutoTokenizer.from_pretrained("google/muril-base-cased").save_pretrained(MLM_DIR)
+    tok = AutoTokenizer.from_pretrained(MLM_DIR)
+enc = AutoTokenizer.from_pretrained("Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL")
+print("vocab MLM == vocab cnerg_muril:", tok.get_vocab() == enc.get_vocab())
+print("MLM   :", tok.tokenize("Bajetigu thu nin ajji 😡"))
+print("cnerg :", enc.tokenize("Bajetigu thu nin ajji 😡"), " (cnerg chuyen chu thuong)")''')
+
+md("""## 2) Cấu hình các run
+
+Mọi run dùng chung `COMMON` và đều có hậu tố `SUFFIX`, nên không đè lên run của notebook chính.
+Mỗi dòng trong `RUNS` là một run cho mỗi task:
+
+| run | ý nghĩa |
+|---|---|
+| `base` | cnerg_muril thuần: mốc để so |
+| `mix` | + trộn bảng muril gốc và MuRIL-MLM, trọng số theo từng token |
+| `mix_g` | như trên, một trọng số chung cho mỗi nguồn |
+| `mlm_enc` | **đối chứng**: dùng thẳng MuRIL-MLM làm encoder (không trộn) |
+| `mix_side` | `mix` + `side_embedding: char+phonetic` |
+
+Bỏ `#` / thêm `#` để chọn run. Chênh lệch dưới ~0,02 macro-F1 là trong mức nhiễu của lát eval.""")
+
+code('''TASKS  = ['a', 'b']
+COMMON = {                                   # ap cho MOI run
+    'training.epochs': 6,
+    'training.early_stopping_patience': 6,   # chay tron lich LR roi giu epoch tot nhat
+    # 'training.loss': 'ce',                 # task b mac dinh focal
+    # 'data.max_len': 128,
+}
+SUFFIX = f"_e{COMMON['training.epochs']}"
+MIX    = "[google/muril-base-cased,checkpoints/mlm/muril-base-cased]"   # KHONG co dau cach
+
+RUNS = [   # (ten, config, override rieng)
+    ('base',     'cnerg_muril', {}),
+    ('mix',      'cnerg_muril', {'model.embed_mix': MIX, 'model.embed_mix_mode': 'token'}),
+    ('mix_g',    'cnerg_muril', {'model.embed_mix': MIX, 'model.embed_mix_mode': 'global'}),
+    ('mlm_enc',  'muril',       {'model.name': 'checkpoints/mlm/muril-base-cased'}),
+    # ('mix_side', 'cnerg_muril', {'model.embed_mix': MIX, 'model.side_embedding': 'char+phonetic'}),
+]
+# Khoa khac cua embed_mix (configs/base.yaml): model.embed_mix_lr (mac dinh 1e-3)''')
+
+code('''import time
+fmt = lambda v: str(v).replace(" ", "")
+t0 = time.time()
+jobs = [(r, t) for r in RUNS for t in TASKS]
+for n, ((name, conf, extra), t) in enumerate(jobs, 1):
+    sets = " ".join(f"{k}={fmt(v)}" for k, v in {**COMMON, **extra}.items())
+    print("\\n" + "=" * 72)
+    print(f"[{n}/{len(jobs)}]  {name} | config {conf} | task {t} | +{(time.time() - t0) / 60:.1f} phut")
+    print("=" * 72, flush=True)
+    !python train.py --config configs/{conf}.yaml --task {t} --set {sets} --run_suffix {SUFFIX}
+print(f"\\nxong {len(jobs)} run trong {(time.time() - t0) / 60:.1f} phut")''')
+
+md("""## 3) Kết quả
+
+Bảng macro-F1 của các run trong notebook này (lọc theo `SUFFIX`), kèm trọng số trộn mà mỗi run
+học được (đọc từ log). Nhớ rằng lát eval nhiễu ±0,02.""")
+
+code('''import pandas as pd, glob
+d = pd.read_csv('results/metrics.csv')
+d = d[d.run.str.endswith(SUFFIX)]
+display(d[['task', 'run', 'macro_f1', 'accuracy', 'best_epoch']]
+        .sort_values(['task', 'macro_f1'], ascending=[True, False]))
+for f in sorted(glob.glob(f'logs/*{SUFFIX}.log')):
+    lines = [l.split('| INFO | ')[-1].strip() for l in open(f, encoding='utf-8')
+             if 'embed_mix a[' in l or 'side_gate' in l]
+    if lines:
+        print(f"\\n{f}"); print("\\n".join("  " + l for l in lines))''')
+
+code('''# Blend cac run trong notebook nay (trong so toi uu tren lat eval -> lac quan):
+for t in TASKS:
+    runs = " ".join(d[d.task == t].run)
+    if runs:
+        !python evaluate.py --task {t} --runs {runs} --optimize --tag blend_mix''')
+
+md("""## 4) Tải kết quả về
+
+Nén `results/` và `logs/`. **Không** nén checkpoint: mỗi checkpoint embed_mix nặng thêm khoảng
+0,3 GB cho mỗi bảng trộn.""")
+
+code('''%cd /kaggle/working/repo
+!zip -r -q /kaggle/working/results_embed_mix.zip results logs
+!ls -lh /kaggle/working/results_embed_mix.zip''')
+
+write("embed_mix.ipynb")

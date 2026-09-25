@@ -100,6 +100,18 @@ model:
   # 1 encoder duy nhat; vector cua tu duoc chep len moi subword cua tu do theo word_ids().
   # Ten run them _se-<kieu>. Can tokenizer fast (khong dung voi CANINE), text_type=latin, khong tta.
   side_embedding: null
+  # Embedding mix: BAT/TAT bang mot khoa. 1 tokenizer (cua encoder) -> tron bang word embedding
+  # cua NHIEU checkpoint -> 1 encoder:   e = E_0[id] + sum_k a_k * (E_k[id] - E_0[id])
+  #   E_0 = bang cua encoder (model.name, van duoc train); E_k = bang cua nguon k (DONG BANG).
+  #   a_k khoi tao 0 -> buoc dau = model goc.
+  # Nguon phai DUNG CHUNG VOCAB voi encoder (row i = token i o ca hai), vd voi cnerg_muril:
+  #   [google/muril-base-cased, checkpoints/mlm/muril-base-cased]
+  # mBERT / XLM-R bi tu choi: tokenizer MuRIL chi khop ~80% token voi chung, va phan truot la
+  # chinh tu Kanglish. Ten run them _mix-<nguon>. Moi bang +0.3 GB (fp16) tren GPU va checkpoint.
+  embed_mix: null           # null | ten/duong dan checkpoint | danh sach nhieu nguon
+  embed_mix_mode: token     # CHI embed_mix: token = moi token co trong so rieng (router)
+                            #                global = 1 trong so chung cho moi nguon
+  embed_mix_lr: 1.0e-3      # CHI embed_mix: lr cua router / trong so tron
   side_char_dim: 32         # CHI side: so chieu embedding moi ky tu
   side_char_filters: 64     # CHI side: so filter moi do rong CNN (2,3,4,5) -> vector ky tu 4x
   side_key_dim: 128         # CHI side: so chieu embedding khoa phien am

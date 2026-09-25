@@ -70,7 +70,8 @@ def check_run_dir(run_dir: Path, cfg, overwrite, log) -> bool:
 def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     """log: the logger object (Trainer calls log.info itself)."""
     import torch
-    from src.models.factory import build_featurizer, build_model, build_side_vocab, build_tokenizer
+    from src.models.factory import (build_featurizer, build_model, build_side_vocab, build_tokenizer,
+                                    load_mix_tables)
     from src.training.losses import build_loss
     from src.training.trainer import Trainer
 
@@ -123,6 +124,10 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
         log.info(f"side embedding {side_vocab.kind}: {side_vocab.n_chars} ky tu, {side_vocab.n_keys} "
                  f"khoa phien am (>= {side_vocab.min_count} lan trong lat fit), gate khoi tao = 0")
     model = build_model(cfg, n_labels, featurizer, side_vocab)
+    if model.mix_cfg:
+        model.set_mix_tables(load_mix_tables(cfg, tokenizer, log.info))
+        log.info(f"embed_mix ({model.mix_cfg['mode']}): bang cua encoder + "
+                 f"{len(model.mix_cfg['sources'])} bang dong bang, trong so tron khoi tao = 0")
     log.info(f"san sang sau {time.time() - t0:.0f}s")
     log.info(f"freeze: {model.freeze_summary}")
     trainer = Trainer(cfg, model, tokenizer, build_loss(loss_name, cfg["training"], counts), device, log)
@@ -135,6 +140,21 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
         return sum(trainer.predict(df[c]) for c in infer_cols) / len(infer_cols)
 
     single = infer_cols == [train_col]
+    if model.mix_cfg:
+        # What the mix settled on, over the fit slice's real tokens. 0 = the source was ignored;
+        # 1 = its table replaced the encoder's for those tokens.
+        import torch
+        enc = tokenizer(fit[train_col].tolist()[:2000], truncation=True,
+                        max_length=cfg["data"]["max_len"], padding=True, return_tensors="pt")
+        dev = next(model.parameters()).device
+        with torch.no_grad():
+            a = model.mix_alphas(enc["input_ids"].to(dev)).float().cpu()
+        real = (enc["attention_mask"] == 1) & ~torch.isin(enc["input_ids"],
+                                                          torch.tensor(tokenizer.all_special_ids))
+        for k, src in enumerate(model.mix_cfg["sources"]):
+            ak = a[..., k][real]
+            log.info(f"embed_mix a[{src}]: trung binh {ak.mean():+.4f} | |a| {ak.abs().mean():.4f} "
+                     f"| p5..p95 {ak.quantile(.05):+.3f}..{ak.quantile(.95):+.3f}")
     gate = model.side_gate_norm()    # None unless model.side_embedding is on
     if gate is not None:
         # 0 would mean the side stream was never used -- worth knowing before crediting it

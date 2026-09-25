@@ -50,6 +50,48 @@ def build_side_vocab(cfg, texts, tokenizer):
         texts, tokenizer, cfg["data"]["max_len"])
 
 
+def mix_sources(cfg):
+    """model.embed_mix as a list of checkpoint names/paths (a single string is one source)."""
+    src = cfg["model"].get("embed_mix")
+    if not src:
+        return []
+    return [src] if isinstance(src, str) else list(src)
+
+
+def load_mix_tables(cfg, tokenizer, log=print):
+    """-> one word-embedding table per model.embed_mix source, checked against the encoder's
+    tokenizer. The ids fed to every table come from that one tokenizer, so a source is only
+    usable if its vocabulary is the same file: row i must mean token i in both. Measured with
+    MuRIL's tokenizer, mBERT's vocabulary covers 81.6% of the token occurrences, XLM-R's 79.8%
+    -- and what falls through is the Kanglish (madi, ##beku, namm, yav), so those are refused
+    rather than mapped."""
+    import torch
+    from transformers import AutoModel
+    own = tokenizer.get_vocab()
+    probe = "Bajetigu thu nin ajji sulle maga"
+    tables = []
+    for src in mix_sources(cfg):
+        if src == cfg["model"]["name"]:
+            raise SystemExit(f"model.embed_mix: {src} chinh la encoder -- bang cua no da co san.")
+        other = AutoTokenizer.from_pretrained(src)
+        if other.get_vocab() != own:
+            raise SystemExit(f"model.embed_mix: tokenizer cua {src} khac vocab voi {cfg['model']['name']} "
+                             f"({len(other)} vs {len(own)} muc). Chi tron duoc bang dung chung vocab "
+                             f"(vd google/muril-base-cased, cnerg_muril, checkpoints/mlm/muril-base-cased).")
+        if other.tokenize(probe) != tokenizer.tokenize(probe):
+            # Same vocabulary, different pre-processing (cnerg_muril lowercases, MuRIL does not).
+            # Still valid -- the ids index the same rows -- but the source table then meets ids
+            # in a casing it may have seen less of. Worth a line in the log, not a refusal.
+            log(f"  embed_mix: {src} tach chu khac encoder (vd chu hoa/thuong); van dung chung id "
+                f"cua tokenizer encoder")
+        m = AutoModel.from_pretrained(src)
+        w = m.get_input_embeddings().weight.detach().to(torch.float16).clone()
+        del m
+        tables.append(w)
+        log(f"  embed_mix: nap bang {tuple(w.shape)} tu {src}")
+    return tables
+
+
 def build_model(cfg, num_labels: int, featurizer=None, side_vocab=None):
     m = cfg["model"]
     if m["type"] != "transformer":
@@ -62,6 +104,9 @@ def build_model(cfg, num_labels: int, featurizer=None, side_vocab=None):
         "char_dim": m.get("side_char_dim", 32), "char_filters": m.get("side_char_filters", 64),
         "key_dim": m.get("side_key_dim", 128), "dropout": m.get("side_dropout", 0.1),
         "lr": m.get("side_lr", 1e-3)}
+    sources = mix_sources(cfg)
+    embed_mix = None if not sources else {
+        "sources": sources, "mode": m.get("embed_mix_mode", "token"), "lr": m.get("embed_mix_lr", 1e-3)}
     model = TransformerClassifier(m["name"], num_labels, m.get("pooling", "cls"), m.get("dropout", 0.1),
                                   unfreeze_last_n_blocks=m.get("unfreeze_last_n_blocks"),
                                   freeze_embeddings=m.get("freeze_embeddings"),
@@ -69,7 +114,7 @@ def build_model(cfg, num_labels: int, featurizer=None, side_vocab=None):
                                   load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"),
                                   dtype=m.get("dtype"),
                                   multisample_dropout=m.get("multisample_dropout"), hybrid=hybrid,
-                                  side=side)
+                                  side=side, embed_mix=embed_mix)
     model.featurizer = featurizer
     model.side_vocab = side_vocab
     return model

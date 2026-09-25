@@ -100,6 +100,17 @@ def model_tag(cfg: dict) -> str:
     return "_" + re.sub(r"[^A-Za-z0-9]+", "-", tag).strip("-").lower()[:20]
 
 
+def _short_tag(name: str) -> str:
+    """google/muril-base-cased -> muril, checkpoints/mlm/muril-base-cased -> mlm,
+    Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL -> cnerg."""
+    parts = [p for p in str(name).replace("\\", "/").rstrip("/").split("/") if p]
+    if len(parts) >= 3 and parts[0] == "checkpoints":
+        return re.sub(r"[^A-Za-z0-9]+", "", parts[-2]).lower()[:10]
+    if "cnerg" in str(name).lower():
+        return "cnerg"
+    return re.sub(r"[^A-Za-z0-9]+", "", parts[-1].split("-")[0]).lower()[:10]
+
+
 def run_name(cfg: dict) -> str:
     """<config>_<loss>_s<seed> (tfidf: <config>_<clf>), plus an optional --run_suffix.
     The suffix exists so a batch of runs with changed hyper-parameters can keep the
@@ -120,6 +131,11 @@ def run_name(cfg: dict) -> str:
     # _se-char / _se-phonetic / _se-char-phonetic: the side embedding is a different model too
     se = cfg["model"].get("side_embedding") if cfg["model"]["type"] != "tfidf" else None
     se = f"_se-{se.replace('+', '-')}" if se else ""
+    # _mix-<tag>[-<tag>]: which tables were mixed in, short enough to read (see _short_tag)
+    mix = cfg["model"].get("embed_mix") if cfg["model"]["type"] != "tfidf" else None
+    mix = [mix] if isinstance(mix, str) else (mix or [])
+    se += ("_mix-" + "-".join(_short_tag(x) for x in mix)
+           + ("-g" if cfg["model"].get("embed_mix_mode") == "global" else "")) if mix else ""
     return (base + text_suffix(cfg) + model_tag(cfg) + hyb + se + full
             + (cfg.get("run_suffix") or ""))
 
@@ -169,6 +185,9 @@ def training_signature(cfg: dict) -> dict:
     if m.get("head") != "mlp":
         m.pop("mlp_dims", None)
         m.pop("mlp_dropout", None)
+    if not m.get("embed_mix"):                           # and for the embedding mix's
+        m.pop("embed_mix_mode", None)
+        m.pop("embed_mix_lr", None)
     if not m.get("side_embedding"):                      # and for the side embedding's
         for k in ("side_char_dim", "side_char_filters", "side_key_dim", "side_dropout", "side_lr",
                   "side_min_count", "side_max_word_len"):

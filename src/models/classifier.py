@@ -89,7 +89,7 @@ class TransformerClassifier(nn.Module):
                  dropout: float = 0.1, backbone_config=None,
                  unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
                  layers=None, load_in_4bit=False, lora=None, dtype=None,
-                 multisample_dropout=None, hybrid=None, side=None):
+                 multisample_dropout=None, hybrid=None, side=None, embed_mix=None):
         super().__init__()
         self.name = backbone_name        # needed before self.meta exists, e.g. by _apply_lora
         self.quantized = bool(load_in_4bit)
@@ -166,10 +166,33 @@ class TransformerClassifier(nn.Module):
             # One scale per hidden dimension, starting at 0: step 0 is the pretrained model
             # exactly, and the gradient reaches the side branch through the gate as it opens.
             self.side_gate = nn.Parameter(torch.zeros(hidden))
+        # model.embed_mix: extra word-embedding tables from checkpoints that share this model's
+        # vocabulary, mixed into its own table before the encoder:
+        #   e = E_0[id] + sum_k a_k * (E_k[id] - E_0[id])
+        # a_k starts at 0 (so step 0 is the unmodified model) and is either one learned scalar
+        # per source ("global") or a per-token value from a zero-initialised router ("token").
+        # The extra tables are frozen fp16 buffers: they are what the other checkpoints learned,
+        # and fine-tuning 152M more rows on 2.8k-5.7k comments would only overfit them.
+        # {"sources": [...], "mode", "lr"}; the tables themselves arrive through load_state_dict
+        # or set_mix_tables().
+        self.mix_cfg = dict(embed_mix) if embed_mix else None
+        if self.mix_cfg:
+            if load_in_4bit or lora:
+                raise SystemExit("model.embed_mix khong di chung voi LoRA / load_in_4bit.")
+            K = len(self.mix_cfg["sources"])
+            vocab = self.backbone.get_input_embeddings().weight.shape[0]
+            for k in range(K):
+                self.register_buffer(f"mix_table_{k}", torch.zeros(vocab, hidden, dtype=torch.float16))
+            if self.mix_cfg.get("mode", "token") == "token":
+                self.mix_router = nn.Linear(hidden, K)
+                nn.init.zeros_(self.mix_router.weight)
+                nn.init.zeros_(self.mix_router.bias)
+            else:
+                self.mix_alpha = nn.Parameter(torch.zeros(K))
         self.meta = {"backbone_name": backbone_name, "num_labels": num_labels,
                      "pooling": pooling, "dropout": dropout, "head_cfg": head_cfg,
                      "layers": self.layers, "multisample_dropout": self.n_dropout,
-                     "hybrid": self.hybrid, "side": self.side_cfg}
+                     "hybrid": self.hybrid, "side": self.side_cfg, "embed_mix": self.mix_cfg}
         self.pooling = pooling
         self.dropout = nn.Dropout(dropout)
         # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
@@ -247,6 +270,32 @@ class TransformerClassifier(nn.Module):
             w = self.layer_weights.float().softmax(0).to(hidden_states[0].dtype)
             return sum(w[i] * h for i, h in enumerate(hidden_states))
         return torch.cat([hidden_states[i] for i in self.layers], dim=-1)
+
+    def set_mix_tables(self, tables):
+        """Copy the extra embedding tables in, one [vocab, hidden] tensor per source."""
+        for k, t in enumerate(tables):
+            buf = getattr(self, f"mix_table_{k}")
+            if tuple(t.shape) != tuple(buf.shape):
+                raise SystemExit(f"embed_mix nguon {self.mix_cfg['sources'][k]}: bang {tuple(t.shape)} "
+                                 f"khong khop encoder {tuple(buf.shape)}")
+            buf.copy_(t.to(buf.dtype))
+
+    def mix_alphas(self, input_ids):
+        """-> [B, T, K] mixing weights a_k for these tokens."""
+        if hasattr(self, "mix_router"):
+            e0 = self.backbone.get_input_embeddings()(input_ids)
+            return self.mix_router(e0.to(self.mix_router.weight.dtype))
+        return self.mix_alpha.view(1, 1, -1).expand(*input_ids.shape, -1)
+
+    def _mix(self, e0, input_ids):
+        """e0 + sum_k a_k (E_k - e0): every difference is taken against the encoder's own
+        table, so the sources do not depend on the order they are listed in."""
+        a = self.mix_alphas(input_ids).to(e0.dtype)
+        out = e0
+        for k in range(len(self.mix_cfg["sources"])):
+            ek = getattr(self, f"mix_table_{k}")[input_ids].to(e0.dtype)
+            out = out + a[..., k:k + 1] * (ek - e0)
+        return out
 
     def side_gate_norm(self):
         """-> mean |gate| of the side branch, for the log: 0 means the model never used it."""
@@ -333,17 +382,20 @@ class TransformerClassifier(nn.Module):
     def forward(self, input_ids, attention_mask, token_type_ids=None, tfidf=None,
                 side_tok2word=None, side_chars=None, side_keys=None, **_):
         kw = {"input_ids": input_ids, "attention_mask": attention_mask}
-        if self.side_cfg:
-            if side_tok2word is None:
-                raise RuntimeError("model.side_embedding bat nhung batch khong co side_*: loader phai "
-                                   "duoc tao voi side=model.side_vocab.")
+        if self.side_cfg or self.mix_cfg:
             # Mix at the word-embedding lookup and hand the sum over as inputs_embeds: the
             # backbone then adds its own position / token-type embeddings and LayerNorm on top,
             # exactly as it does for input_ids.
             e = self.backbone.get_input_embeddings()(input_ids)
-            side = self.side(side_tok2word, side_chars, side_keys)
-            kw = {"inputs_embeds": e + self.side_gate.to(e.dtype) * side.to(e.dtype),
-                  "attention_mask": attention_mask}
+            if self.mix_cfg:
+                e = self._mix(e, input_ids)
+            if self.side_cfg:
+                if side_tok2word is None:
+                    raise RuntimeError("model.side_embedding bat nhung batch khong co side_*: loader "
+                                       "phai duoc tao voi side=model.side_vocab.")
+                side = self.side(side_tok2word, side_chars, side_keys)
+                e = e + self.side_gate.to(e.dtype) * side.to(e.dtype)
+            kw = {"inputs_embeds": e, "attention_mask": attention_mask}
         if token_type_ids is not None:
             kw["token_type_ids"] = token_type_ids
         if self.layers is None:
@@ -422,7 +474,8 @@ class TransformerClassifier(nn.Module):
             return n_blocks + 1
 
         trainable = [(n, p) for n, p in self.named_parameters()
-                     if p.requires_grad and not n.startswith(("head.", "tfidf_proj.", "side.", "side_gate"))]
+                     if p.requires_grad and not n.startswith(("head.", "tfidf_proj.", "side.", "side_gate",
+                                                              "mix_router.", "mix_alpha"))]
         # The exponent is measured from the topmost depth that actually has parameters, not from
         # n_blocks+1: BertModel has nothing above its last block (its pooler is frozen here), so a
         # fixed ceiling would leave that rung empty and shift the whole ladder down one notch --
@@ -446,6 +499,10 @@ class TransformerClassifier(nn.Module):
                 key, p_lr, wd = ("mix", 0.0), mix_lr or head_lr or lr, 0.0
             elif n.startswith("head."):
                 key, p_lr = ("head", wd), head_lr or lr
+            elif n.startswith(("mix_router.", "mix_alpha")):
+                # A handful of new parameters that must move off zero to matter; decay would
+                # only pull the mix back to "encoder table only".
+                key, p_lr, wd = ("mix", 0.0), (self.mix_cfg or {}).get("lr") or head_lr or lr, 0.0
             elif n.startswith(("side.", "side_gate")):
                 # New and randomly initialised like the hybrid branch; the gate in particular
                 # starts at 0 and has to move to matter at all. No weight decay on the gate:
@@ -498,7 +555,8 @@ class TransformerClassifier(nn.Module):
                     backbone_config=bcfg, head_cfg=meta.get("head_cfg"),
                     layers=meta.get("layers"),
                     multisample_dropout=meta.get("multisample_dropout"),
-                    hybrid=meta.get("hybrid"), side=meta.get("side"))
+                    hybrid=meta.get("hybrid"), side=meta.get("side"),
+                    embed_mix=meta.get("embed_mix"))
         sd = torch.load(ckpt_dir / "model.pt", map_location=map_location)
         model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in sd.items()})
         if model.hybrid:
