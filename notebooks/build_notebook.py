@@ -444,7 +444,7 @@ checkpoints/{task}/{run}/           trọng số fp16 của run đó
 |---|---|---|---|
 | `eval.npy` | lát held-out 10% **cắt ra từ train** | ✅ | chấm điểm nội bộ, chọn model, tìm trọng số blend |
 | `val.npy` | `*_validation_inputs.csv` **của BTC** | ❌ | **nộp phase Development** |
-| `test.npy` | `*_test_inputs.csv` (phát 20/9) | ❌ | **nộp phase Evaluation** |
+| `test.npy` | `hastika_*_test.csv` của BTC | ❌ | **nộp phase Evaluation** |
 
 Chữ "val" xuất hiện ở hai nghĩa khác nhau: lát held-out (có nhãn, để bạn tự chấm) và file
 validation của BTC (không nhãn, để nộp). `eval.npy` là cái đầu, `val.npy` là cái sau.
@@ -454,11 +454,15 @@ validation của BTC (không nhãn, để nộp). `eval.npy` là cái đầu, `v
 Codabench có **2 leaderboard riêng biệt**, mỗi task nộp **một** `predictions.csv`. Bạn chỉ có
 **20 lượt nộp**, nên đừng nộp từng model — chọn theo điểm held-out ở mục 4 rồi nộp bản tốt nhất.
 
-- Run train *sau* khi có test → `--split test`
-- Run train *trước* khi có test → mode 2 (`--checkpoints ... --input ...`), không cần train lại""")
+- Mọi run giờ sinh **cả hai** file nộp: `{task}_val_{run}` (phase Development) và
+  `{task}_test_{run}` (phase Evaluation).
+- Run train **trước khi có file test**: chạy lại đúng lệnh train của nó là đủ. `train.py` thấy
+  thiếu `test.npy` thì tự dự đoán từ checkpoint (transformer, không train lại), hoặc train lại
+  (TF-IDF, vài giây; hoặc transformer không lưu checkpoint).""")
 
-md("""**Cách 1 — từng model riêng: đã có sẵn.** `train.py` tự sinh file nộp cho file validation của
-BTC ngay sau khi train xong, đặt tên `{task}_val_{run}`. Cell này chỉ để xem lại danh sách:""")
+md("""**Cách 1 — từng model riêng: đã có sẵn.** `train.py` tự sinh file nộp ngay sau khi train xong:
+`{task}_val_{run}` cho file validation và `{task}_test_{run}` cho file test của BTC. Cell này chỉ
+để xem lại danh sách:""")
 code('''import glob, os
 for z in sorted(glob.glob('results/submissions/*/submission.zip')):
     d = os.path.dirname(z)
@@ -474,10 +478,12 @@ for t in ('a', 'b'):
     print(f"task {t}: macro-F1 {b['macro_f1']:.4f} | " + ", ".join(f"{r}:{w:g}" for r, w in keep))
     runs = " ".join(r for r, _ in keep)
     ws   = " ".join(str(w) for _, w in keep)
-    !python inference.py --task {t} --runs {runs} --weights {ws} --split val --tag ens
+    # both = {t}_val_ens (phase Development) va {t}_test_ens (phase Evaluation), cung trong so
+    !python inference.py --task {t} --runs {runs} --weights {ws} --split both --tag ens
 
-# test, tu checkpoint (run train truoc khi co test):
-# !python inference.py --task b --checkpoints checkpoints/b/muril_focal_s42 --input data/raw/multiclass_test_inputs.csv --tag ens1''')
+# Neu bao "test.npy missing": run do train truoc khi co file test -> chay lai lenh train cua no
+# (train.py tu bo sung test.npy), hoac du doan thang tu checkpoint:
+# !python inference.py --task b --checkpoints checkpoints/b/muril_focal_s42 --input data/raw/hastika_multiclass_test.csv --tag ens1''')
 
 code('''import glob, os, shutil
 out = '/kaggle/working/submissions'
@@ -951,6 +957,23 @@ for d in sorted(glob.glob('checkpoints/mlm_v2/*')):
     !zip -r -q {z} {d}
     print(f"{z}: {os.path.getsize(z) / 1e9:.2f} GB")''')
 
+md("""## File nộp (val + test)
+
+Mỗi run fine-tune ở trên đã sinh **hai** file nộp trong `results/submissions/`:
+`{task}_val_{run}` cho phase Development và `{task}_test_{run}` cho phase Evaluation.
+Cell dưới liệt kê chúng và nén `results/` + `logs/` (gồm cả file nộp, **không** gồm checkpoint)
+thành một file để tải về.""")
+code('''%cd /kaggle/working/repo
+import glob, os
+subs = sorted(glob.glob('results/submissions/*/submission.zip'))
+for split in ('val', 'test'):
+    names = [os.path.basename(os.path.dirname(z)) for z in subs if f'_{split}_' in os.path.basename(os.path.dirname(z))]
+    print(f"{split}: {len(names)} file nop")
+    for n in names:
+        print("   ", n)
+!zip -r -q /kaggle/working/results_pretrain_mlm.zip results logs
+!ls -lh /kaggle/working/results_pretrain_mlm.zip''')
+
 write("pretrain_mlm.ipynb")
 
 
@@ -1225,3 +1248,203 @@ code('''%cd /kaggle/working/repo
 !ls -lh /kaggle/working/results_embed_mix.zip''')
 
 write("embed_mix.ipynb")
+
+
+# =====================================================================================
+# =====================================================================================
+#  Notebook 6 -- vocabulary extension + MLM (pretrain_mlm.py --extend_vocab), then
+#  fine-tune and compare against the same MLM without the new words.
+# =====================================================================================
+md(f"""# Hướng 2 — Mở rộng vocab + MLM
+
+**Settings:** Accelerator = **GPU T4 ×2** · Internet = **On** · khoảng 1,5–2 giờ nếu chạy hết
+
+```
+kho Kanglish ──► tìm từ hay gặp mà bị cắt vụn:  maklu → ma ##k ##lu  (96 lần)
+                                                   │
+tokenizer cnerg_muril  + ~180–210 từ mới  ──────►  maklu → [maklu]      makluge → [maklu] ##ge
+bảng embedding 197.285 → +N dòng, mỗi dòng mới = trung bình các mảnh cũ
+                                                   │
+PHA 1 (3 epoch): encoder ĐÓNG BĂNG, chỉ train N dòng mới (lr 1e-3)
+PHA 2 (15 epoch): MLM che cả từ, train toàn bộ, lưu epoch có eval ppl tốt nhất
+                                                   │
+fine-tune Task A/B  ──►  so với: cnerg_muril thuần  và  MLM bản 2 CÙNG cài đặt nhưng KHÔNG thêm từ
+```
+
+**Để so sánh công bằng:** run đối chứng (`RUN_CONTROL`) dùng **đúng** các cài đặt MLM (che cả từ,
+cùng epoch, cùng seed, cùng tập đánh giá) và chỉ khác ở chỗ không thêm từ. Chênh lệch macro-F1
+giữa hai bản khi đó là do vocab.
+
+> **Kỳ vọng thực tế.** Mỗi từ mới chỉ xuất hiện khoảng 20 lần trong kho, nên mỗi token mới được
+> "luyện" khoảng 100 lần trong cả quá trình. Đó là rất ít để học một vector 768 chiều. Mức tăng
+> có thể từ 0 đến +1 điểm, nằm trong nhiễu ±0,02 của lát eval. **ppl của bản này không so được**
+> với bản không thêm từ (đơn vị token khác nhau). Chỉ so bằng macro-F1 ở mục 4.""")
+
+code(f'''import os, subprocess, sys
+
+REPO, BRANCH, WORK = "{REPO}", "{BRANCH}", "/kaggle/working"
+TOKEN = ""
+try:
+    from kaggle_secrets import UserSecretsClient
+    TOKEN = UserSecretsClient().get_secret("GH_TOKEN")
+except Exception:
+    pass
+url = f"https://{{TOKEN + '@' if TOKEN else ''}}github.com/{{REPO}}.git"
+hide = (lambda s: s.replace(TOKEN, "***")) if TOKEN else (lambda s: s)
+
+os.chdir(WORK)
+cmd = (["git", "-C", "repo", "pull", "--ff-only"] if os.path.isdir("repo/.git")
+       else ["git", "clone", "--depth", "1", "-b", BRANCH, url, "repo"])
+r = subprocess.run(cmd, capture_output=True, text=True)
+print(hide((r.stdout + r.stderr).strip()))
+if r.returncode:
+    raise SystemExit("git that bai -- kiem tra Internet = On, repo Public")
+
+os.chdir(f"{{WORK}}/repo"); sys.path.insert(0, os.getcwd())
+print(subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())''')
+
+code('''!pip -q install ftfy sentencepiece
+!nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+!ls data/raw''')
+
+md("""## 1) Bảng điều khiển
+
+Mọi cài đặt nằm ở cell dưới. Các cell sau chỉ đọc từ đây.""")
+
+code('''# ============================== BANG DIEU KHIEN ==============================
+MODEL     = 'Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL'   # diem xuat phat MLM
+CONFIG    = 'cnerg_muril'               # config fine-tune tuong ung trong configs/
+HEAD_FROM = 'google/muril-base-cased'   # cnerg khong co dau MLM -> chep tu day (None neu model co san)
+
+# ---- mo rong vocab ----
+MIN_COUNT     = 10      # tu phai gap >= so lan nay trong kho
+MIN_PIECES    = 3       # ... va bi cat >= so manh nay (2 -> ~950 tu, rui ro hon)
+MAX_WORDS     = 0       # tran so tu moi (0 = khong gioi han)
+WARMUP_EPOCHS = 3       # PHA 1: chi train dong moi, encoder dong bang (0 = bo pha 1)
+EXT_LR        = 1e-3    # lr cua pha 1
+
+# ---- MLM (PHA 2) -- giong het run doi chung ----
+MLM_EPOCHS = 15;  WWM = True;  EVAL_RATIO = 0.05
+BATCH = 32;  GRAD_ACCUM = 1;  MAX_LEN = 128;  LR = 5e-5
+
+OUT         = 'checkpoints/mlm_vx/cnerg-muril'   # co vocab mo rong
+RUN_CONTROL = True                               # MLM cung cai dat, KHONG them tu
+CONTROL_OUT = 'checkpoints/mlm_v2/cnerg-muril'   # bo qua neu da co (vd tu pretrain_mlm.ipynb)
+
+# ---- fine-tune de so sanh ----
+FT_EPOCHS = 6
+TASKS     = ['a', 'b']
+# ===================================================================================''')
+
+md("""## 2) Xem trước từ mới (không train, vài giây)
+
+Dùng đúng kho và đúng cách tách tập đánh giá như `pretrain_mlm.py` (seed 42). Từ mới chỉ được
+chọn từ phần **train** của kho MLM, không lấy từ tập đánh giá.""")
+
+code('''import random, pandas as pd
+from transformers import AutoTokenizer
+from pretrain_mlm import build_corpus
+from src.utils.config import load_config
+from src.models.vocab_ext import find_new_words
+
+corpus = build_corpus(load_config("configs/base.yaml", task="a"), include_eval=False, log=lambda *a: None)
+idx = list(range(len(corpus))); random.Random(42).shuffle(idx)
+n_ev = max(1, int(round(EVAL_RATIO * len(corpus)))) if EVAL_RATIO > 0 else 0
+train_part = [corpus[i] for i in idx[n_ev:]]
+
+tok = AutoTokenizer.from_pretrained(MODEL)
+cand, st = find_new_words(train_part, tok, MIN_COUNT, MIN_PIECES, MAX_WORDS)
+print(f"kho MLM: {len(train_part):,} cau (train) + {n_ev:,} cau danh gia")
+print(f"tu moi: {st['new_words']}  |  moi tu xuat hien trung binh {st['mean_count_of_new']:.0f} lan")
+print(f"manh/tu: {st['pieces_per_word_before']:.2f} -> {st['pieces_per_word_after']:.2f}")
+display(pd.DataFrame([(w, n, ' '.join(p)) for w, n, p in cand], columns=['tu moi', 'so lan', 'dang bi cat thanh']).head(40))''')
+
+md("""## 3) Chạy MLM
+
+Log in `pha1 ep …` rồi `pha2 ep …`. `*` = epoch có eval ppl tốt nhất đến lúc đó, được lưu ngay.
+Danh sách từ đã thêm được ghi vào `OUT/added_words.tsv`.
+
+**Phần cứng** (2×T4, batch 32, max_len 128): GPU 0 khoảng 8 GB. Thêm vài trăm từ gần như không
+tốn thêm bộ nhớ. Pha 1 nhanh hơn một epoch thường vì encoder không cập nhật.""")
+
+code('''import time, os
+common = (f"--model {MODEL} --epochs {MLM_EPOCHS} --batch_size {BATCH} --grad_accum {GRAD_ACCUM} "
+          f"--max_len {MAX_LEN} --lr {LR} --eval_ratio {EVAL_RATIO}"
+          + (" --wwm" if WWM else "") + (f" --mlm_head_from {HEAD_FROM}" if HEAD_FROM else ""))
+
+t0 = time.time()
+print("=" * 72, "\\nMO RONG VOCAB ->", OUT, "\\n" + "=" * 72, flush=True)
+!python pretrain_mlm.py {common} --out {OUT} --extend_vocab --ext_min_count {MIN_COUNT} --ext_min_pieces {MIN_PIECES} --ext_max_words {MAX_WORDS} --ext_warmup_epochs {WARMUP_EPOCHS} --ext_lr {EXT_LR}
+print(f"-> {(time.time() - t0) / 60:.1f} phut")
+
+if RUN_CONTROL:
+    if os.path.isfile(f"{CONTROL_OUT}/config.json"):
+        print("doi chung da co:", CONTROL_OUT, "-> bo qua")
+    else:
+        t0 = time.time()
+        print("=" * 72, "\\nDOI CHUNG (khong them tu) ->", CONTROL_OUT, "\\n" + "=" * 72, flush=True)
+        !python pretrain_mlm.py {common} --out {CONTROL_OUT}
+        print(f"-> {(time.time() - t0) / 60:.1f} phut")''')
+
+md("""## 4) Fine-tune và so sánh
+
+Ba run cho mỗi task, cùng cài đặt fine-tune:
+
+| run | model |
+|---|---|
+| gốc | `CONFIG` thuần |
+| đối chứng | MLM bản 2, không thêm từ (`CONTROL_OUT`) |
+| **mở rộng vocab** | `OUT` |
+
+Tên run tự phân biệt theo thư mục (`_mlm-v2`, `_mlm-vx`).""")
+
+code('''SUF = f'_e{FT_EPOCHS}'
+FT  = f'--set training.epochs={FT_EPOCHS} training.early_stopping_patience={FT_EPOCHS}'
+MODELS = [None] + [d for d in ([CONTROL_OUT] if RUN_CONTROL else []) + [OUT] if os.path.isfile(f'{d}/config.json')]
+for t in TASKS:
+    for m in MODELS:
+        print("=" * 72, f"\\ntask {t} | {m or CONFIG + ' (goc)'}", flush=True)
+        extra = f" model.name={m}" if m else ""
+        !python train.py --config configs/{CONFIG}.yaml --task {t} {FT}{extra} --run_suffix {SUF}''')
+
+code('''from src.utils.config import load_config, run_name
+names = {}
+for t in TASKS:
+    for m in MODELS:
+        sets = [f"training.epochs={FT_EPOCHS}", f"training.early_stopping_patience={FT_EPOCHS}"] + ([f"model.name={m}"] if m else [])
+        names[run_name(load_config(f"configs/{CONFIG}.yaml", sets, task=t, run_suffix=SUF))] = m or "goc"
+d = pd.read_csv('results/metrics.csv')
+d = d[d.run.isin(names)].assign(model=lambda x: x.run.map(names))
+display(d[['task', 'model', 'run', 'macro_f1', 'accuracy', 'best_epoch']].sort_values(['task', 'macro_f1'], ascending=[True, False]))''')
+
+md("""## 5) Tải checkpoint về
+
+Khoảng 1,5 GB mỗi checkpoint. Zip giữ nguyên đường dẫn, nên giải nén ở gốc repo là dùng được.
+Tokenizer mở rộng nằm **trong** thư mục checkpoint, nên `train.py` và `inference.py` tự dùng
+đúng tokenizer đó.""")
+
+code('''%cd /kaggle/working/repo
+for d in [OUT] + ([CONTROL_OUT] if RUN_CONTROL else []):
+    if os.path.isdir(d):
+        z = f"/kaggle/working/{d.replace('/', '_')}.zip"
+        !zip -r -q {z} {d}
+        print(f"{z}: {os.path.getsize(z) / 1e9:.2f} GB")''')
+
+md("""## File nộp (val + test)
+
+Mỗi run fine-tune ở trên đã sinh **hai** file nộp trong `results/submissions/`:
+`{task}_val_{run}` cho phase Development và `{task}_test_{run}` cho phase Evaluation.
+Cell dưới liệt kê chúng và nén `results/` + `logs/` (gồm cả file nộp, **không** gồm checkpoint)
+thành một file để tải về.""")
+code('''%cd /kaggle/working/repo
+import glob, os
+subs = sorted(glob.glob('results/submissions/*/submission.zip'))
+for split in ('val', 'test'):
+    names = [os.path.basename(os.path.dirname(z)) for z in subs if f'_{split}_' in os.path.basename(os.path.dirname(z))]
+    print(f"{split}: {len(names)} file nop")
+    for n in names:
+        print("   ", n)
+!zip -r -q /kaggle/working/results_vocab_ext.zip results logs
+!ls -lh /kaggle/working/results_vocab_ext.zip''')
+
+write("vocab_ext.ipynb")

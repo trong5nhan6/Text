@@ -261,6 +261,16 @@ def parse():
     ap.add_argument("--mlm_head_from",
                     help="checkpoint to copy the MLM head from when --model has none, e.g. "
                          "google/muril-base-cased for Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL")
+    # --- vocabulary extension (src/models/vocab_ext.py) ---
+    ap.add_argument("--extend_vocab", action="store_true",
+                    help="add the corpus' frequent, fragmented words to the tokenizer as whole tokens")
+    ap.add_argument("--ext_min_count", type=int, default=10, help="a word must occur this often")
+    ap.add_argument("--ext_min_pieces", type=int, default=3, help="...and be cut into this many pieces")
+    ap.add_argument("--ext_max_words", type=int, default=0, help="cap on new words (0 = no cap)")
+    ap.add_argument("--ext_warmup_epochs", type=int, default=3,
+                    help="phase 1: epochs training ONLY the new embedding rows, encoder frozen, "
+                         "before the --epochs of ordinary MLM. 0 = skip phase 1.")
+    ap.add_argument("--ext_lr", type=float, default=1e-3, help="phase-1 learning rate")
     return ap.parse_args()
 
 
@@ -310,6 +320,22 @@ def main():
         copy_mlm_head(model, a.mlm_head_from, log.info)
     elif a.mlm_head_from:
         log.info(f"{a.model} da co dau MLM -> bo qua --mlm_head_from")
+    n_old = None                     # set when the vocabulary is extended: first new row
+    if a.extend_vocab:
+        from src.models.vocab_ext import extend, find_new_words
+        # Chosen from the MLM training text only, not the evaluation split.
+        cand, st = find_new_words(corpus, tok, a.ext_min_count, a.ext_min_pieces, a.ext_max_words)
+        log.info(f"mo rong vocab: {st['new_words']} tu (gap >= {a.ext_min_count} lan, >= "
+                 f"{a.ext_min_pieces} manh), moi tu xuat hien trung binh {st['mean_count_of_new']:.0f} "
+                 f"lan | manh/tu {st['pieces_per_word_before']:.2f} -> {st['pieces_per_word_after']:.2f}")
+        log.info("  vd: " + ", ".join(f"{w}({n}: {' '.join(p)})" for w, n, p in cand[:8]))
+        if not cand:
+            raise SystemExit("khong co tu nao dat nguong -- ha --ext_min_count / --ext_min_pieces")
+        n_old, _ = extend(tok, model, [w for w, _, _ in cand], log.info)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "added_words.tsv", "w", encoding="utf-8") as f:
+            f.write("word\tcount\told_pieces\n")
+            f.writelines(f"{w}\t{n}\t{' '.join(p)}\n" for w, n, p in cand)
     model = model.float().to(device)
     amp = resolve_precision("auto", device)
     n_gpu = torch.cuda.device_count() if device.type == "cuda" else 0
@@ -363,66 +389,93 @@ def main():
                  + ("  -- CHAT, giam --batch_size hoac --max_len neu OOM"
                     if gb_gpu0 > 0.75 * total else ""))
 
-    decay = [p for n, p in model.named_parameters()
-             if p.requires_grad and not any(k in n for k in ("bias", "LayerNorm.weight"))]
-    no_decay = [p for n, p in model.named_parameters()
-                if p.requires_grad and any(k in n for k in ("bias", "LayerNorm.weight"))]
-    opt = torch.optim.AdamW([{"params": decay, "weight_decay": a.weight_decay},
-                             {"params": no_decay, "weight_decay": 0.0}], lr=a.lr)
-    steps = math.ceil(len(dl) / a.grad_accum) * a.epochs
-    sch = get_linear_schedule_with_warmup(opt, int(a.warmup_ratio * steps), steps)
-    scaler = torch.amp.GradScaler(enabled=amp == torch.float16)
-
     def save(tag):
         out_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(out_dir)
         tok.save_pretrained(out_dir)
         log.info(f"da luu -> {out_dir} ({tag})")
 
-    best = (float("inf"), 0)
+    best = [float("inf"), ""]        # eval loss, "<phase>ep <n>" -- across both phases
     if ev_batches:
         l0 = eval_loss(model, ev_batches, device, amp)
         log.info(f"truoc khi train: eval loss {l0:.4f} ppl {torch.tensor(l0).exp():.2f}")
-    model.train()
-    for ep in range(1, a.epochs + 1):
-        t0, total = time.time(), 0.0
-        opt.zero_grad(set_to_none=True)
-        for i, batch in enumerate(dl):
-            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
-            with torch.autocast(device_type=device.type, dtype=amp or torch.float32,
-                                enabled=amp is not None):
-                # `fwd`, not `out`: `out_dir` used to be called `out`, and this line shadowed it
-                # so the run trained for its full schedule and then died on out.mkdir().
-                fwd = net(**batch)
-                loss = fwd.mean() if use_dp else fwd.loss   # DataParallel -> one loss per replica
-            total += loss.item()
-            scaler.scale(loss / a.grad_accum).backward()
-            if (i + 1) % a.grad_accum == 0 or i + 1 == len(dl):
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                # A skipped step (the scaler saw inf/nan and lowered its scale) must not advance
-                # the schedule; stepping anyway is what produces the "lr_scheduler.step() before
-                # optimizer.step()" warning, and it silently shortens the LR schedule.
-                prev = scaler.get_scale()
-                scaler.step(opt); scaler.update()
-                if scaler.get_scale() >= prev:
-                    sch.step()
-                opt.zero_grad(set_to_none=True)
-        mean = total / len(dl)
-        # Perplexity is the number to watch: it starts high because the vocabulary pieces are
-        # wrong for this text, and falling is exactly the adaptation this script exists to do.
-        msg = f"ep {ep}/{a.epochs} loss {mean:.4f} ppl {torch.tensor(mean).exp():.2f}"
-        if ev_batches:
-            le = eval_loss(model, ev_batches, device, amp)
-            better = le < best[0]
-            msg += f" | eval loss {le:.4f} ppl {torch.tensor(le).exp():.2f}{' *' if better else ''}"
-            if better:
-                best = (le, ep)
-        log.info(msg + f" ({time.time() - t0:.0f}s)")
-        if ev_batches and best[1] == ep:
-            # Saved as it improves rather than kept in memory: a Kaggle session that times out
-            # still leaves the best epoch so far on disk.
-            save(f"epoch {ep}, eval ppl {torch.tensor(best[0]).exp():.2f}")
+
+    def run_phase(n_epochs, lr, weight_decay, tag=""):
+        """One LR schedule over n_epochs, optimising whatever currently requires grad; the best
+        evaluation epoch is saved as soon as it happens."""
+        named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+        decay = [p for n, p in named if not any(k in n for k in ("bias", "LayerNorm.weight"))]
+        no_decay = [p for n, p in named if any(k in n for k in ("bias", "LayerNorm.weight"))]
+        opt = torch.optim.AdamW([{"params": decay, "weight_decay": weight_decay},
+                                 {"params": no_decay, "weight_decay": 0.0}], lr=lr)
+        steps = math.ceil(len(dl) / a.grad_accum) * n_epochs
+        sch = get_linear_schedule_with_warmup(opt, int(a.warmup_ratio * steps), steps)
+        scaler = torch.amp.GradScaler(enabled=amp == torch.float16)
+        model.train()
+        for ep in range(1, n_epochs + 1):
+            t0, total = time.time(), 0.0
+            opt.zero_grad(set_to_none=True)
+            for i, batch in enumerate(dl):
+                batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+                with torch.autocast(device_type=device.type, dtype=amp or torch.float32,
+                                    enabled=amp is not None):
+                    # `fwd`, not `out`: `out_dir` used to be called `out`, and this line shadowed
+                    # it so the run trained for its full schedule and then died on out.mkdir().
+                    fwd = net(**batch)
+                    loss = fwd.mean() if use_dp else fwd.loss   # DataParallel -> one loss per replica
+                total += loss.item()
+                scaler.scale(loss / a.grad_accum).backward()
+                if (i + 1) % a.grad_accum == 0 or i + 1 == len(dl):
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_([p for _, p in named], 1.0)
+                    # A skipped step (the scaler saw inf/nan and lowered its scale) must not
+                    # advance the schedule; stepping anyway silently shortens the LR schedule.
+                    prev = scaler.get_scale()
+                    scaler.step(opt); scaler.update()
+                    if scaler.get_scale() >= prev:
+                        sch.step()
+                    opt.zero_grad(set_to_none=True)
+            mean = total / len(dl)
+            # Perplexity is the number to watch: it starts high because the vocabulary pieces are
+            # wrong for this text, and falling is exactly the adaptation this script exists to do.
+            msg = f"{tag}ep {ep}/{n_epochs} loss {mean:.4f} ppl {torch.tensor(mean).exp():.2f}"
+            improved = False
+            if ev_batches:
+                le = eval_loss(model, ev_batches, device, amp)
+                improved = le < best[0]
+                msg += f" | eval loss {le:.4f} ppl {torch.tensor(le).exp():.2f}{' *' if improved else ''}"
+                if improved:
+                    best[:] = [le, f"{tag}ep {ep}"]
+            log.info(msg + f" ({time.time() - t0:.0f}s)")
+            if improved:
+                # Saved as it improves rather than kept in memory: a Kaggle session that times
+                # out still leaves the best epoch so far on disk.
+                save(f"{best[1]}, eval ppl {torch.tensor(best[0]).exp():.2f}")
+
+    if n_old is not None and a.ext_warmup_epochs > 0:
+        # Phase 1: only the new rows move. The encoder and the old vocabulary are frozen, and the
+        # gradient on the embedding matrix (tied to the MLM decoder) and on the output bias is
+        # zeroed for every old row -- the softmax over the whole vocabulary sends gradient to all
+        # of them, and a 1e-3 step there would undo what the pretrained rows mean.
+        keep_new = lambda g: torch.cat([torch.zeros_like(g[:n_old]), g[n_old:]])
+        for p in model.parameters():
+            p.requires_grad_(False)
+        trainable = [model.get_input_embeddings().weight]
+        if hasattr(model, "cls"):
+            trainable.append(model.cls.predictions.bias)
+        hooks = []
+        for p in trainable:
+            p.requires_grad_(True)
+            hooks.append(p.register_hook(keep_new))
+        log.info(f"PHA 1: {a.ext_warmup_epochs} epoch, chi train "
+                 f"{trainable[0].shape[0] - n_old} dong moi (encoder dong bang), lr {a.ext_lr:g}")
+        run_phase(a.ext_warmup_epochs, a.ext_lr, 0.0, "pha1 ")
+        for h in hooks:
+            h.remove()
+        for p in model.parameters():
+            p.requires_grad_(True)
+        log.info(f"PHA 2: {a.epochs} epoch, train toan bo, lr {a.lr:g}")
+    run_phase(a.epochs, a.lr, a.weight_decay, "pha2 " if n_old is not None else "")
 
     if ev_batches:
         log.info(f"epoch tot nhat: {best[1]} (eval ppl {torch.tensor(best[0]).exp():.2f}) -- da luu o tren")
