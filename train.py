@@ -67,6 +67,31 @@ def check_run_dir(run_dir: Path, cfg, overwrite, log) -> bool:
     return False
 
 
+def backfill_test(cfg, run_dir: Path, name, test, res_dir: Path, log) -> bool:
+    """A transformer run finished before the test file existed: predict test from its saved
+    checkpoint -- the same weights that produced its val.npy -- instead of retraining.
+    -> False when that is not possible (TF-IDF, no checkpoint, or a non-Latin / tta view the
+    checkpoint path does not reproduce), and the caller retrains."""
+    if cfg["model"]["type"] == "tfidf" or infer_columns(cfg) != ["text"]:
+        return False
+    ck = Path(cfg["paths"]["checkpoint_dir"]) / cfg["task"] / name
+    if not (ck / "model.pt").exists():
+        return False
+    from inference import predict_checkpoint_dir
+    log.info(f"{name}: chua co test.npy -> du doan file test tu checkpoint {ck}")
+    p = predict_checkpoint_dir(ck, test.text)
+    np.save(run_dir / "test.npy", p)
+    write_submission(test.id.values, p, label_names(cfg["task"]),
+                     res_dir / "submissions" / f"{cfg['task']}_test_{name}", log.info)
+    mf = run_dir / "metrics.json"
+    if mf.exists():
+        m = json.load(open(mf))
+        m["has_test"] = True
+        json.dump(m, open(mf, "w"), indent=1)
+    rebuild_metrics_table(res_dir)
+    return True
+
+
 def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     """log: the logger object (Trainer calls log.info itself)."""
     import torch
@@ -195,7 +220,17 @@ def main():
     log = get_logger("hastika", Path(cfg["paths"]["log_dir"]) / f"{cfg['task']}_{name}.log")
     log.info(f"===== task {cfg['task']} | run {name} | config {a.config} =====")
     if check_run_dir(run_dir, cfg, a.overwrite, log.info):
-        return
+        # Finished -- but maybe before the organisers' test file existed. Fill in test.npy and its
+        # submission rather than leave the run unusable for the Evaluation phase.
+        ensure_processed(cfg, log.info)
+        test = load_split(cfg, "test")
+        if test is None or (run_dir / "test.npy").exists():
+            return
+        if backfill_test(cfg, run_dir, name, test, res_dir, log):
+            return
+        log.info(f"{name} xong truoc khi co file test va khong co checkpoint de du doan lai "
+                 f"-> train lai de sinh test.npy")
+        check_run_dir(run_dir, cfg, True, log.info)
 
     ensure_processed(cfg, log.info)
     train, val, test = load_split(cfg, "train"), load_split(cfg, "val"), load_split(cfg, "test")

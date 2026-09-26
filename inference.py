@@ -4,13 +4,14 @@ Create a CodaBench submission (predictions.csv + flat submission.zip).
 
 Mode 1 — from saved probabilities of finished runs (single run or blend):
   python inference.py --task a --runs muril_ce_s42 --split val
+  python inference.py --task a --runs tfidf_lr muril_ce_s42 --split both      # val + test in one go
   python inference.py --task b --runs tfidf_lr muril_wce_s42 roberta_wce_s42 --weights 1 2 2 --split test
 
 Mode 2 — from checkpoints on any CSV (id + Comment).
 Use this when the test file arrives after training (no retraining needed):
-  python inference.py --task a --checkpoints checkpoints/a/muril_ce_s42 --input data/raw/binary_test_inputs.csv
+  python inference.py --task a --checkpoints checkpoints/a/muril_ce_s42 --input data/raw/hastika_binary_test.csv
   python inference.py --task b --checkpoints checkpoints/b/muril_wce_s42 checkpoints/b/roberta_wce_s42 \
-                      --input data/raw/multiclass_test_inputs.csv --tfidf_runs tfidf_lr
+                      --input data/raw/hastika_multiclass_test.csv --tfidf_runs tfidf_lr
 
 Output: results/submissions/{task}_{split|input}_{tag}/predictions.csv + submission.zip
 """
@@ -70,7 +71,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", choices=["a", "b"], required=True)
     ap.add_argument("--runs", nargs="*", default=[], help="finished runs in results/{task}/ (mode 1)")
-    ap.add_argument("--split", choices=["val", "test"], default="val")
+    ap.add_argument("--split", choices=["val", "test", "both"], default="val",
+                    help="mode 1: which organiser file to write a submission for; both = val and test")
     ap.add_argument("--checkpoints", nargs="*", default=[], help="checkpoints/{task}/{run} folders (mode 2)")
     ap.add_argument("--input", help="CSV to predict in mode 2")
     ap.add_argument("--tfidf_runs", nargs="*", default=[],
@@ -82,7 +84,20 @@ def main():
     ap.add_argument("--tag")
     ap.add_argument("--config", default="configs/base.yaml")
     a = ap.parse_args()
+    if a.split == "both":
+        if a.checkpoints:
+            raise SystemExit("--split both chi dung voi --runs (mode 1); mode 2 doc --input")
+        import copy
+        for s in ("val", "test"):
+            print(f"==== split {s} ====")
+            b = copy.copy(a)
+            b.split = s
+            run(b)
+        return
+    run(a)
 
+
+def run(a):
     cfg = load_config(a.config, task=a.task)
     labels = label_names(a.task)
     res = Path(cfg["paths"]["results_dir"])
