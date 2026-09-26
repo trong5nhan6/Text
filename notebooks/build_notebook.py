@@ -827,9 +827,9 @@ Gom **mọi** file có Kanglish, khử trùng lặp. Không cần nhãn nào.
 
 > **Lát held-out bị loại khỏi kho, mặc định.** Văn bản đó không mang nhãn nên giữ lại cũng không
 > rò rỉ nhãn — nhưng model sẽ đã đọc đúng những câu ấy, và mọi macro-F1 đo trên lát đó sau này
-> sẽ **lạc quan một cách âm thầm**. Giữ trung thực chỉ tốn 919 dòng trên 13.995.
+> sẽ **lạc quan một cách âm thầm**. Giữ trung thực chỉ tốn 919 dòng (kho còn khoảng 13,5 nghìn dòng).
 >
-> Ngược lại, `*_validation_inputs.csv` và file test **được** đưa vào: đó là transductive learning
+> Ngược lại, `*_validation_inputs.csv` và file test (`hastika_*_test.csv`) **được** đưa vào: đó là transductive learning
 > thông thường, và đúng là tình huống bản nộp sẽ chạy. Nhớ khai báo điều này trong bài báo.""")
 code('''from pretrain_mlm import build_corpus
 from src.utils.config import load_config
@@ -842,41 +842,60 @@ print(f"-> {len(corpus):,} dong")
 for t in corpus[:5]:
     print("   ", t[:80])''')
 
-md("""## 2) Chạy MLM
+md("""## 2) Chạy MLM — bản 2
 
-`--epochs 15` trên ~13k dòng là khoảng 20–25 phút trên T4. Theo dõi **perplexity**: nó bắt đầu
-cao vì các mảnh từ vựng đang sai với văn bản này, và **giảm xuống chính là sự thích nghi** mà
-script này tồn tại để làm. Nếu nó không giảm, có gì đó sai.""")
-code('''MODEL      = 'google/muril-base-cased'
-MLM_EPOCHS = 15     # so epoch cua MLM. Fine-tune co so epoch RIENG, o muc 3.
+So với bản 1 (`checkpoints/mlm/muril-base-cased`):
+
+| | bản 1 | **bản 2** |
+|---|---|---|
+| Cách che | từng mảnh (`th [MASK]` → nhìn `th` là đoán ra) | **cả từ** `--wwm` (`[MASK] [MASK]` → phải đọc câu) |
+| Kho | train + val | **+ file test** (`hastika_*_test.csv`, không dùng nhãn) |
+| Xuất phát | `google/muril` | **`cnerg_muril`** (+ bản `google/muril` để so) |
+| Đầu MLM | có sẵn | cnerg **không có** → chép từ `google/muril` (`--mlm_head_from`) |
+| Khi nào dừng | lưu epoch cuối | tách **5%** làm tập đánh giá (`--eval_ratio`), **lưu epoch tốt nhất** |
+
+**Đọc log:** mỗi epoch in `loss/ppl` (trên kho train) và `eval loss/ppl` (trên 5% tách riêng).
+`*` = epoch tốt nhất đến lúc đó, và checkpoint được lưu ngay lúc ấy. Nếu `eval ppl` bắt đầu
+**tăng** trong khi `ppl` train vẫn giảm, model đang học thuộc kho.
+
+> **Đừng hoảng với số đầu của cnerg.** Đo ở máy: trước khi train, `cnerg_muril` có eval loss
+> **14,9**, còn tệ hơn đoán đều (12,2), vì các tầng trên của nó đã bị fine-tune cho phân loại nên
+> đầu MLM chép sang không khớp. Nhưng chỉ sau 24 bước nó xuống **8,4**, dưới cả `google/muril` gốc
+> (8,6 với cùng cách che cả từ). Với vài nghìn bước trên Kaggle nó hồi phục hẳn.
+>
+> Che cả từ **khó hơn** che từng mảnh (google/muril: loss 8,6 so với 7,8). Vì vậy ppl của bản 2
+> **không so được** với ppl của bản 1. Chỉ so được bằng macro-F1 sau fine-tune, ở mục 3.""")
+
+code('''# ============================ MLM ban 2 ============================
+MLM_RUNS = [   # (checkpoint xuat phat, chep dau MLM tu, thu muc luu) -- moi dong ~30 phut tren 2xT4
+    ('Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL', 'google/muril-base-cased', 'checkpoints/mlm_v2/cnerg-muril'),
+    ('google/muril-base-cased',                           None,                      'checkpoints/mlm_v2/muril'),
+]
+MLM_EPOCHS = 15     # tran; epoch tot nhat theo eval ppl moi duoc luu
+WWM        = True   # che ca tu
+EVAL_RATIO = 0.05   # 5% kho lam tap danh gia MLM (0 = tat, luu epoch cuoi nhu ban 1)
 BATCH      = 32     # TONG, chia deu cho cac GPU (2 x T4 -> 16/GPU). Giam neu OOM.
-GRAD_ACCUM = 1      # BATCH x GRAD_ACCUM = batch hieu dung (32 x 1 = 32)
-MAX_LEN    = 128    # do dai theo TOKEN; giam con 96 cung tiet kiem nhieu VRAM
+GRAD_ACCUM = 1      # BATCH x GRAD_ACCUM = batch hieu dung
+MAX_LEN    = 128    # token
+LR         = 5e-5
 
-!python pretrain_mlm.py --model {MODEL} --epochs {MLM_EPOCHS} --batch_size {BATCH} --grad_accum {GRAD_ACCUM} --max_len {MAX_LEN}
+import time
+for model, head, out in MLM_RUNS:
+    flags = (f"--model {model} --out {out} --epochs {MLM_EPOCHS} --batch_size {BATCH} "
+             f"--grad_accum {GRAD_ACCUM} --max_len {MAX_LEN} --lr {LR} --eval_ratio {EVAL_RATIO}"
+             + (" --wwm" if WWM else "") + (f" --mlm_head_from {head}" if head else ""))
+    print("=" * 72, f"\\n{model}  ->  {out}\\n" + "=" * 72, flush=True)
+    t0 = time.time()
+    !python pretrain_mlm.py {flags}
+    print(f"-> {(time.time() - t0) / 60:.1f} phut")
 
-# Bien the:
-# !python pretrain_mlm.py --model Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL --epochs 15
-# !python pretrain_mlm.py --model xlm-roberta-base --epochs 15
-# !python pretrain_mlm.py --epochs 20 --lr 1e-4        # kho nho -> co the can lr cao hon
-# !python pretrain_mlm.py --include_eval               # CHI cho ban nop cuoi, diem noi bo se lac quan
-#
-# NEU OOM: ha BATCH va tang GRAD_ACCUM de giu batch hieu dung (vd 16 x 2, hoac 8 x 4).
-# CHI dung 1 GPU du co 2:  them --single_gpu
-#
-# THU NHANH truoc khi bo 25 phut GPU -- chay het ca phan luu trong ~1 phut:
-# !python pretrain_mlm.py --max_rows 200 --epochs 1 --out /tmp/mlm_test''')
+# THU NHANH truoc khi bo 1 gio GPU (chay het ca phan luu, ~1-2 phut):
+# !python pretrain_mlm.py --model Hate-speech-CNERG/kannada-codemixed-abusive-MuRIL --mlm_head_from google/muril-base-cased --wwm --eval_ratio 0.2 --max_rows 200 --epochs 1 --out /tmp/mlm_test
+# NEU OOM: ha BATCH va tang GRAD_ACCUM (vd 16 x 2). CHI 1 GPU: them --single_gpu vao flags.''')
 
 md("""> **Về OOM.** Logits của MLM có shape `[batch, len, vocab]`, mà vocab của MuRIL là
-> **197.285** — nên riêng một tensor đó ở `batch 32 × len 128` đã chiếm **3,2 GB**, và phải giữ
+> **197.285**, nên riêng một tensor đó ở `batch 32 × len 128` đã chiếm **3,2 GB**, và phải giữ
 > hai bản (xuôi + ngược). Đó là thứ làm nổ T4, không phải model.
->
-> | batch × len | logits (xuôi+ngược) | + model/AdamW | ~tổng |
-> |---|---|---|---|
-> | 32 × 128 | 6,46 GB | 3,81 GB | ~11,5 GB → **OOM** |
-> | 16 × 128 | 3,23 GB | 3,81 GB | ~8,2 GB |
-> | **8 × 128** | **1,62 GB** | 3,81 GB | **~6,6 GB** ✅ mặc định |
-> | 4 × 128 | 0,81 GB | 3,81 GB | ~5,8 GB |
 >
 > **Trên 2×T4 script tự dùng cả hai GPU** (`DataParallel`), nên `BATCH` là **tổng** và mỗi GPU
 > chỉ giữ một nửa:
@@ -888,50 +907,49 @@ md("""> **Về OOM.** Logits của MLM có shape `[batch, len, vocab]`, mà voca
 > | 48 | 24 | 4,85 GB | 9,7 GB | 6,8 GB |
 > | 64 | 32 | 6,46 GB | 11,3 GB | 8,4 GB |
 >
-> GPU 0 luôn chật hơn vì chỉ nó giữ trọng số gốc, gradient và hai trạng thái AdamW (3,8 GB);
-> GPU kia chỉ giữ một bản sao trọng số.
->
-> **Chạy trên máy 1 GPU vẫn bình thường** — script tự dò `torch.cuda.device_count()` và chỉ bật
-> `DataParallel` khi thấy nhiều hơn một. Checkpoint lưu ra giống hệt nhau trong cả hai trường hợp.
->
-> Script in ước lượng VRAM **trước khi** train, nên bạn biết trước chứ không phải đợi nó crash.""")
+> GPU 0 luôn chật hơn vì chỉ nó giữ trọng số gốc, gradient và hai trạng thái AdamW (3,8 GB).
+> Che cả từ và tập đánh giá **không** tốn thêm VRAM. Script in ước lượng VRAM **trước khi** train.""")
 
 md("""## 3) Fine-tune từ checkpoint vừa thích nghi
 
-Không cần code mới — chỉ trỏ `model.name` vào thư mục vừa lưu. Chạy **cả bản gốc lẫn bản MLM**
-thì mới biết nó có giúp không.""")
-code('''# (config, checkpoint MLM tuong ung). Them dong moi sau khi da chay pretrain_mlm.py cho model do.
-PAIRS = [
-    ('muril',   'checkpoints/mlm/muril-base-cased'),
-  # ('roberta', 'checkpoints/mlm/xlm-roberta-base'),
-  # ('cnerg_muril', 'checkpoints/mlm/kannada-codemixed-abusive-MuRIL'),
+Không cần code mới: chỉ trỏ `model.name` vào thư mục vừa lưu. Mỗi dòng trong `PAIRS` chạy **bản
+gốc** và **bản MLM** cho cả hai task. Bản gốc đã chạy rồi thì tự bỏ qua. `run_name` tự gắn đuôi
+theo thư mục (`_mlm`, `_mlm-v2`) nên các bản không bao giờ đè lên nhau.""")
+code('''import os
+PAIRS = [   # (config, checkpoint MLM tuong ung)
+    ('cnerg_muril', 'checkpoints/mlm_v2/cnerg-muril'),   # MLM ban 2 tu cnerg
+    ('muril',       'checkpoints/mlm_v2/muril'),         # MLM ban 2 tu google/muril
+    ('muril',       'checkpoints/mlm/muril-base-cased'), # MLM ban 1 (neu co) -- de so ban 1 va ban 2
 ]
-FT_EPOCHS = 6     # so epoch khi FINE-TUNE -- KHAC voi MLM_EPOCHS o tren (cai do la cua MLM).
-                  # base.yaml dang de 20; doi gia tri thi BAT BUOC co suffix, nen no nam trong SUF.
+FT_EPOCHS = 6     # so epoch khi FINE-TUNE -- KHAC voi MLM_EPOCHS o tren
 SUF = f'_e{FT_EPOCHS}'
-# patience = epochs tuc TAT early stopping: trainer van giu epoch tot nhat, con lich LR duoc
-# anneal het. Voi epochs=20 thi model dat dinh o epoch ~5 luc LR con ~83% -- phi doan anneal.
+# patience = epochs: chay tron lich LR roi giu epoch tot nhat
 FT = f'--set training.epochs={FT_EPOCHS} training.early_stopping_patience={FT_EPOCHS}'
 
-# Ten thu muc TU PHAN BIET: run_name gan them '_mlm' khi model.name bi ghi de, nen ban goc va
-# ban MLM khong bao gio dung chung mot thu muc, va khong can them --run_suffix bang tay.
 for cfg, ckpt in PAIRS:
+    if not os.path.isfile(f'{ckpt}/config.json'):
+        print(f"bo qua {ckpt}: chua co"); continue
     for t in ('a', 'b'):
-        print("=" * 70)
+        print("=" * 70, flush=True)
         !python train.py --config configs/{cfg}.yaml --task {t} {FT} --run_suffix {SUF}
         !python train.py --config configs/{cfg}.yaml --task {t} {FT} model.name={ckpt} --run_suffix {SUF}''')
 
 code('''import pandas as pd
 d = pd.read_csv('results/metrics.csv')
-display(d[d.run.str.contains('muril')][['task', 'run', 'macro_f1', 'accuracy', 'best_epoch']]
+display(d[d.run.str.contains('muril') & d.run.str.endswith(SUF)][['task', 'run', 'macro_f1', 'accuracy', 'best_epoch']]
         .sort_values(['task', 'macro_f1'], ascending=[True, False]))''')
 
 md("""## 4) Tải checkpoint về
 
-**~0,9 GB** — chỉ tải nếu bạn muốn dùng lại ở máy hoặc ở session Kaggle khác. Nếu không, cứ chạy
-lại notebook này (25 phút) thì nhanh hơn là tải lên tải xuống.""")
-code('''!cd /kaggle/working/repo && zip -r -q /kaggle/working/mlm_muril.zip checkpoints/mlm
-!ls -lh /kaggle/working/mlm_muril.zip''')
+Mỗi checkpoint MLM khoảng **1,5 GB** (fp32, kèm đầu MLM). Nén **riêng từng cái** để tải từng file
+và để dùng trong `embed_mix.ipynb` hoặc session Kaggle khác (upload thành Kaggle Dataset hoặc
+Google Drive). Cấu trúc bên trong zip giữ nguyên đường dẫn, nên giải nén ở gốc repo là dùng được.""")
+code('''%cd /kaggle/working/repo
+import glob, os
+for d in sorted(glob.glob('checkpoints/mlm_v2/*')):
+    z = f"/kaggle/working/{d.replace('/', '_')}.zip"
+    !zip -r -q {z} {d}
+    print(f"{z}: {os.path.getsize(z) / 1e9:.2f} GB")''')
 
 write("pretrain_mlm.ipynb")
 

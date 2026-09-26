@@ -32,12 +32,13 @@ TASKS = {
     "a": {
         "labels": ["Non-Hate", "Hate"],
         "train": "binary_train.csv", "val": "binary_validation_inputs.csv",
-        "test_glob": "binary*test*.csv", "label_col": "Label",
+        # leading * as well: the organisers released hastika_binary_test.csv, not binary_test*.csv
+        "test_glob": "*binary*test*.csv", "label_col": "Label",
     },
     "b": {
         "labels": ["Gender", "Political", "Religion", "Geo-political", "Violence", "Others"],
         "train": "multiclass_train.csv", "val": "multiclass_validation_inputs.csv",
-        "test_glob": "multiclass*test*.csv", "label_col": "Hate Category",
+        "test_glob": "*multiclass*test*.csv", "label_col": "Hate Category",
     },
 }
 
@@ -198,7 +199,14 @@ def ensure_processed(cfg, log=print):
     if stale:
         what = ", ".join(f"{k}: {old!r} -> {new!r}" for k, (old, new) in changed.items())
         log(f"rebuilding data/processed ({what})")
-    if not (p / f"{task}_train.csv").exists() or have is None or stale:
+    # A test file dropped into data/raw after data/processed was built would otherwise never be
+    # picked up: the split settings did not change, so nothing above notices it.
+    raw = Path(cfg["paths"]["raw_dir"])
+    glob = TASKS[task]["test_glob"]
+    new_test = (any(raw.glob(glob)) or any(raw.parent.glob(glob))) and not (p / f"{task}_test.csv").exists()
+    if new_test:
+        log("co file test moi trong data/raw -> sinh lai data/processed")
+    if not (p / f"{task}_train.csv").exists() or have is None or stale or new_test:
         prepare_task(task, cfg["paths"]["raw_dir"], p, want["val_ratio"], want["split_seed"], log)
 
 
