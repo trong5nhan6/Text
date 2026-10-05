@@ -43,6 +43,9 @@ data:
   # giu nguyen, file test KHONG bi gan nhan. Nhan suy ra tu cau truc du lieu -> phai khai bao.
   # Ten run them _vl.
   val_leak_labels: null
+  # Khung prompt cho LLM: {text} duoc thay bang binh luan. null = dua thang binh luan (mac dinh).
+  # Ten run them _pr. Chi tokenizer thay khung; TF-IDF / side doc binh luan goc.
+  prompt: null
   val_ratio: 0.1            # one 90/10 split: fit on 90%, score on the held-out 10%
   split_seed: 42            # keep fixed -> every run shares the split, so runs can be blended
   max_len: 96               # 95% of comments < 35 words
@@ -105,6 +108,10 @@ model:
   # 1 encoder duy nhat; vector cua tu duoc chep len moi subword cua tu do theo word_ids().
   # Ten run them _se-<kieu>. Can tokenizer fast (khong dung voi CANINE), text_type=latin, khong tta.
   side_embedding: null
+  # CHI task a. true: them head phu "doi tuong bi tan cong" (nhom cua Task B lay tu
+  # multiclass_train.csv, Non-Hate -> none, Hate chua co nhom -> bo qua) train chung voi head
+  # Hate/Non-Hate. Chi dung khi train, du doan khong doi. Ten run them _tg.
+  aux_target: null
   # Embedding mix: BAT/TAT bang mot khoa. 1 tokenizer (cua encoder) -> tron bang word embedding
   # cua NHIEU checkpoint -> 1 encoder:   e = E_0[id] + sum_k a_k * (E_k[id] - E_0[id])
   #   E_0 = bang cua encoder (model.name, van duoc train); E_k = bang cua nguon k (DONG BANG).
@@ -177,6 +184,7 @@ training:
                             # and the router then collapses onto one expert within a few hundred
                             # steps -- which shows up as a mediocre score, never as an error.
   label_smoothing: 0.0
+  target_weight: 0.5        # CHI model.aux_target: trong so loss cua head "doi tuong"
   # Chong overfit. Moi ho model thu o day deu overfit giong nhau: train F1 len 0,98 trong khi
   # eval tut tu 0,80 xuong 0,76. Trong so mac dinh (dropout 0,1 + weight_decay 0,01) la tat ca
   # nhung gi dang chong lai no.

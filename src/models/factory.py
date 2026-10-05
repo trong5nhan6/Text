@@ -114,7 +114,8 @@ def build_model(cfg, num_labels: int, featurizer=None, side_vocab=None):
                                   load_in_4bit=m.get("load_in_4bit"), lora=m.get("lora"),
                                   dtype=m.get("dtype"),
                                   multisample_dropout=m.get("multisample_dropout"), hybrid=hybrid,
-                                  side=side, embed_mix=embed_mix)
+                                  side=side, embed_mix=embed_mix,
+                                  target_head=7 if m.get("aux_target") else None)
     model.featurizer = featurizer
     model.side_vocab = side_vocab
     return model

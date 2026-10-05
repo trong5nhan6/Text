@@ -37,7 +37,7 @@ def predict_checkpoint_dir(run_ckpt: Path, texts, batch_size=64, precision="auto
         raise SystemExit(f"no checkpoint in {run_ckpt} (expected model.pt)")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tok, meta = load_from_checkpoint(run_ckpt)
-    cfg = {"data": {"max_len": meta.get("max_len", 96)},
+    cfg = {"data": {"max_len": meta.get("max_len", 96), "prompt": meta.get("prompt")},
            "training": {"batch_size": batch_size, "eval_batch_size": batch_size, "num_workers": 2}}
     dl = make_loader(list(texts), None, tok, cfg, train=False, featurizer=model.featurizer,
                      side=model.side_vocab)

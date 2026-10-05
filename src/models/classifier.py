@@ -89,7 +89,8 @@ class TransformerClassifier(nn.Module):
                  dropout: float = 0.1, backbone_config=None,
                  unfreeze_last_n_blocks=None, freeze_embeddings=None, head_cfg=None,
                  layers=None, load_in_4bit=False, lora=None, dtype=None,
-                 multisample_dropout=None, hybrid=None, side=None, embed_mix=None):
+                 multisample_dropout=None, hybrid=None, side=None, embed_mix=None,
+                 target_head=None):
         super().__init__()
         self.name = backbone_name        # needed before self.meta exists, e.g. by _apply_lora
         self.quantized = bool(load_in_4bit)
@@ -198,6 +199,17 @@ class TransformerClassifier(nn.Module):
         # Kept under the name `head` on purpose: param_groups() routes head.* to head_lr and
         # excludes it from the LLRD ladder by that prefix, and both must keep holding.
         self.head = build_head(head_cfg.get("head"), width, num_labels, head_cfg)
+        # model.aux_target: a second, training-only head over the same pooled vector that names
+        # WHO is attacked (task-B category, or "none" for Non-Hate). Error analysis on task A
+        # showed 85% of missed Hate carries no slur; this pushes the representation towards
+        # "an attack on a target" instead of "contains an insult". forward() returns its logits
+        # concatenated after the main ones in training mode only, so prediction is unchanged.
+        self.target_n = int(target_head) if target_head else 0
+        if self.target_n:
+            if head_cfg.get("head") == "soft_moe":
+                raise SystemExit("model.aux_target khong di chung voi head soft_moe.")
+            self.target_head = nn.Linear(width, self.target_n)
+        self.meta["target_head"] = self.target_n or None
         # Recorded now, as a plain attribute, because forward needs it and forward also runs
         # inside DataParallel replicas -- where parameters() yields nothing. replicate() sets
         # each replica._parameters[key] to None and re-attaches the broadcast tensor with
@@ -435,8 +447,13 @@ class TransformerClassifier(nn.Module):
             # the same pooled vector. It lowers the variance of each update at roughly no cost --
             # only the head runs again, not the encoder -- and needs no extra data. Training only:
             # at eval dropout is off, so the masks would be identical and the average a no-op.
-            return sum(self.head(self.dropout(pooled)) for _ in range(self.n_dropout)) / self.n_dropout
-        return self.head(self.dropout(pooled))
+            logits = sum(self.head(self.dropout(pooled)) for _ in range(self.n_dropout)) / self.n_dropout
+        else:
+            logits = self.head(self.dropout(pooled))
+        if self.target_n and self.training:
+            # [main | target] -- the Trainer splits them at num_labels
+            return torch.cat([logits, self.target_head(self.dropout(pooled)).to(logits.dtype)], -1)
+        return logits
 
     @property
     def aux_loss(self):
@@ -475,7 +492,7 @@ class TransformerClassifier(nn.Module):
 
         trainable = [(n, p) for n, p in self.named_parameters()
                      if p.requires_grad and not n.startswith(("head.", "tfidf_proj.", "side.", "side_gate",
-                                                              "mix_router.", "mix_alpha"))]
+                                                              "mix_router.", "mix_alpha", "target_head."))]
         # The exponent is measured from the topmost depth that actually has parameters, not from
         # n_blocks+1: BertModel has nothing above its last block (its pooler is frozen here), so a
         # fixed ceiling would leave that rung empty and shift the whole ladder down one notch --
@@ -497,7 +514,7 @@ class TransformerClassifier(nn.Module):
                 # softmax logit only pulls the mix back toward uniform, which is not a prior
                 # worth imposing.
                 key, p_lr, wd = ("mix", 0.0), mix_lr or head_lr or lr, 0.0
-            elif n.startswith("head."):
+            elif n.startswith(("head.", "target_head.")):
                 key, p_lr = ("head", wd), head_lr or lr
             elif n.startswith(("mix_router.", "mix_alpha")):
                 # A handful of new parameters that must move off zero to matter; decay would
@@ -556,7 +573,7 @@ class TransformerClassifier(nn.Module):
                     layers=meta.get("layers"),
                     multisample_dropout=meta.get("multisample_dropout"),
                     hybrid=meta.get("hybrid"), side=meta.get("side"),
-                    embed_mix=meta.get("embed_mix"))
+                    embed_mix=meta.get("embed_mix"), target_head=meta.get("target_head"))
         sd = torch.load(ckpt_dir / "model.pt", map_location=map_location)
         model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in sd.items()})
         if model.hybrid:

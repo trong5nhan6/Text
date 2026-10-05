@@ -92,24 +92,31 @@ def eval_y(train):
 
 
 class TextDataset(Dataset):
-    def __init__(self, texts, labels=None):
+    def __init__(self, texts, labels=None, targets=None):
         self.texts = list(texts)
         self.labels = None if labels is None else list(labels)
+        self.targets = None if targets is None else list(targets)   # model.aux_target, train only
 
     def __len__(self):
         return len(self.texts)
 
     def __getitem__(self, i):
-        return self.texts[i], (None if self.labels is None else self.labels[i])
+        return (self.texts[i], None if self.labels is None else self.labels[i],
+                None if self.targets is None else self.targets[i])
 
 
 class Collator:
-    def __init__(self, tokenizer, max_len: int, featurizer=None, side=None):
+    def __init__(self, tokenizer, max_len: int, featurizer=None, side=None, prompt=None):
         self.tok, self.max_len, self.featurizer, self.side = tokenizer, max_len, featurizer, side
+        self.prompt = prompt
 
     def __call__(self, batch):
         texts = [b[0] for b in batch]
-        enc = self.tok(texts, truncation=True, max_length=self.max_len,
+        # data.prompt: the comment wrapped in a fixed instruction frame (LLMs), the same at train
+        # and predict time. Only the tokenizer sees it; the TF-IDF / side branches read the raw
+        # comment. str.replace, not format(): a comment may contain braces.
+        shown = texts if not self.prompt else [self.prompt.replace("{text}", t) for t in texts]
+        enc = self.tok(shown, truncation=True, max_length=self.max_len,
                        padding=True, return_tensors="pt")
         if self.featurizer is not None:
             # model.hybrid: the TF-IDF vector of the same texts, built per batch so nothing
@@ -118,19 +125,22 @@ class Collator:
         side = self.side.encode(enc, texts) if self.side is not None else {}
         if batch[0][1] is not None:
             enc["labels"] = torch.tensor([b[1] for b in batch], dtype=torch.long)
+        if len(batch[0]) > 2 and batch[0][2] is not None:
+            enc["target_labels"] = torch.tensor([b[2] for b in batch], dtype=torch.long)
         # after encode(): it reads word_ids() off `enc`, which only the tokenizer's own output has
         for k, v in side.items():
             enc[k] = v
         return enc
 
 
-def make_loader(texts, labels, tokenizer, cfg, train: bool, featurizer=None, side=None):
+def make_loader(texts, labels, tokenizer, cfg, train: bool, featurizer=None, side=None, targets=None):
     t = cfg["training"]
     return DataLoader(
-        TextDataset(texts, labels),
+        TextDataset(texts, labels, targets),
         batch_size=t["batch_size"] if train else t["eval_batch_size"],
         shuffle=train,
-        collate_fn=Collator(tokenizer, cfg["data"]["max_len"], featurizer, side),
+        collate_fn=Collator(tokenizer, cfg["data"]["max_len"], featurizer, side,
+                            cfg["data"].get("prompt")),
         num_workers=t.get("num_workers", 2),
         pin_memory=torch.cuda.is_available(),
     )

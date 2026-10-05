@@ -1537,6 +1537,15 @@ MLM_CKPTS = {
     'checkpoints/mlm_vx/cnerg-muril': ('checkpoints_mlm_vx_cnerg-muril.zip', ''),   # <- dan link Drive vao ''
 }
 SUFFIX = f'_e{EPOCHS}'
+
+# ---- TANG 2: LLM ----------------------------------------------------------------
+USE_LLM    = True            # them LLM (configs/llm_qwen7b.yaml) va ghep 2 tang
+LLM_CONFIG = 'llm_qwen7b'    # Qwen2.5-7B-Instruct, 4-bit + LoRA, khung prompt + head "doi tuong"
+LLM_DELTA  = 0.2             # cau co |P_ensemble(Hate) - 0,5| < LLM_DELTA = "vung khong chac" -> hoi LLM
+LLM_MIX    = 0.5             # trong vung do: P = LLM_MIX * P_ensemble + (1 - LLM_MIX) * P_LLM (0 = chi LLM)
+# Ket qua cu (tranh train lai): zip results_final_*.zip tu lan chay truoc, Add Input vao notebook.
+# '' = tu tim moi results*.zip trong /kaggle/input.
+RESULTS_ZIP = ''
 # ===================================================================================''')
 
 md("""## 2) Lấy checkpoint MLM
@@ -1627,7 +1636,7 @@ from src.data.dataset import load_split
 cfg = load_config("configs/base.yaml", ["data.val_leak_labels=true"], task="a")
 ensure_processed(cfg)
 tr, va, te = load_split(cfg, "train"), load_split(cfg, "val"), load_split(cfg, "test")
-aug = add_val_leak(cfg, tr, va)
+aug = add_val_leak(cfg, tr, va) if VAL_LEAK else tr.assign(source="train")
 print(f"\\ntrain goc: fit {int((tr.is_val == 0).sum())} + held-out {int((tr.is_val == 1).sum())}")
 print(f"sau khi them val: fit {int((aug.is_val == 0).sum())} + held-out {int((aug.is_val == 1).sum())}  (held-out phai giu nguyen)")
 print("nguon cua phan fit:", aug[aug.is_val == 0].source.value_counts().to_dict())
@@ -1656,6 +1665,41 @@ for label, conf, mname in TRANSFORMERS:
 for g, label, conf, sets, s, suf, n in JOBS:
     print(f"  {g:6s} {label:7s} seed {s if s else '-':>3}  ->  {n}")
 print(f"\\n{len(JOBS)} run (ban 90%)" + (" + ban 100% sau do" if RUN_FULL else ""))''')
+
+md("""## 4b) Kiểm tra kết quả đã có (tránh train lại)
+
+Nếu bạn *Add Input* file zip kết quả của lần chạy trước (vd `results_final_noleak.zip`), cell
+dưới **khôi phục** các run trong đó vào `results/a/`. `train.py` tự **bỏ qua** run đã xong (cùng
+cấu hình), nên các cell train phía sau **chỉ train phần còn thiếu**:
+- đủ hết → chỉ train LLM (nếu `USE_LLM`);
+- thiếu run nào → train bù run đó trước, rồi mới train LLM.""")
+
+code('''import os, glob, re, zipfile
+zips = [RESULTS_ZIP] if RESULTS_ZIP else sorted(glob.glob("/kaggle/input/**/results*.zip", recursive=True))
+restored = 0
+for zp in zips:
+    with zipfile.ZipFile(zp) as z:
+        for member in z.namelist():
+            m = re.match(r"(?:.*/)?results/a/([^/]+)/([^/]+)$", member)
+            if not m or os.path.exists(f"results/a/{m.group(1)}/{m.group(2)}"):
+                continue                                   # khong de len ket qua dang co
+            os.makedirs(f"results/a/{m.group(1)}", exist_ok=True)
+            with open(f"results/a/{m.group(1)}/{m.group(2)}", "wb") as f:
+                f.write(z.read(member))
+            restored += 1
+print(f"khoi phuc {restored} file tu {len(zips)} zip: {[os.path.basename(z) for z in zips]}")
+
+def is_done(name, scored=True):
+    d = f"results/a/{name}"
+    return os.path.isfile(f"{d}/test.npy") and os.path.isfile(f"{d}/config.yaml") and \\
+           (not scored or os.path.isfile(f"{d}/eval.npy"))
+have = [n for *_, n in JOBS if is_done(n)]
+miss = [n for *_, n in JOBS if not is_done(n)]
+print(f"ban 90%: da co {len(have)}/{len(JOBS)} run" + (f" | THIEU: {miss}" if miss else " -> khong can train lai"))
+full_have = sorted(os.path.basename(d) for d in glob.glob("results/a/*_full*") if is_done(os.path.basename(d), False))
+print(f"ban 100% da co: {len(full_have)} run")
+print("=> " + ("chi train LLM" if USE_LLM and not miss else
+               "train bu run thieu" + (" roi train LLM" if USE_LLM else "")))''')
 
 md("""## 5) Train bản 90% (có điểm held-out)
 
@@ -1699,6 +1743,26 @@ if RUN_FULL:
         !python train.py --config configs/{conf}.yaml --task a --set {args}{extra}
     print(f"\\nxong trong {(time.time() - t0) / 60:.1f} phut")''')
 
+md("""## 6b) Tầng 2 — LLM (nếu `USE_LLM`)
+
+Qwen2.5-7B-Instruct nạp **4-bit**, chỉ train **LoRA** (khoảng 40M tham số) + 2 head: **Hate/Non-Hate**
+và **"đối tượng bị tấn công"** (nhóm của Task B; chỉ dùng khi train). Mỗi bình luận được bọc trong
+khung prompt cố định (xem `configs/llm_qwen7b.yaml`). Chạy trên 1 T4, khoảng 1–1,5 giờ. Đã có kết
+quả (từ zip) thì tự bỏ qua.""")
+
+code('''LLM_NAME = None
+if USE_LLM:
+    !pip -q install peft bitsandbytes accelerate
+    llm_sets = VL
+    LLM_NAME = name_of(LLM_CONFIG, llm_sets)
+    print("LLM run:", LLM_NAME, "(da co -> bo qua)" if is_done(LLM_NAME) else "")
+    t0 = time.time()
+    args = " ".join(llm_sets)
+    !python train.py --config configs/{LLM_CONFIG}.yaml --task a {"--set " + args if args else ""}
+    print(f"-> {(time.time() - t0) / 60:.1f} phut")
+    if not is_done(LLM_NAME):
+        raise SystemExit("LLM chua co ket qua -- xem log o tren (OOM? thieu peft/bitsandbytes?)")''')
+
 md("""## 7) Kết quả trên held-out (chỉ bản 90%)
 
 Từng run, trung bình seed của từng model, từng nhóm, ensemble cuối, và các biến thể bỏ bớt một
@@ -1731,11 +1795,40 @@ summary += [{"to hop": f"ensemble bo {d}", "macro_f1": f1(ensemble("eval", JOBS,
 summary += [{"to hop": f"(tham khao) W={w}", "macro_f1": f1(ensemble("eval", JOBS, w))} for w in (0.4, 0.5, 0.7, 0.8)]
 display(pd.DataFrame(summary).round(4))''')
 
+md("""**Ghép 2 tầng** (chỉ khi `USE_LLM`). Câu nào ensemble **chắc chắn** (|P(Hate) − 0,5| ≥ `LLM_DELTA`)
+giữ nguyên dự đoán của ensemble; câu nào **không chắc** thì trộn với LLM theo `LLM_MIX`.
+
+Bảng quan trọng nhất là **độ chính xác TRONG vùng không chắc**: ensemble và LLM, trên cùng các
+câu. LLM chỉ có ích nếu nó đúng nhiều hơn ensemble ở đúng vùng đó.""")
+
+code('''def cascade(split, jobs, delta=LLM_DELTA, mix=LLM_MIX):
+    p1 = ensemble(split, jobs)
+    p2 = P(LLM_NAME, split)
+    band = np.abs(p1[:, 1] - 0.5) < delta
+    p = p1.copy()
+    p[band] = mix * p1[band] + (1 - mix) * p2[band]
+    return p, band
+
+if USE_LLM:
+    p1, p2 = ensemble("eval", JOBS), P(LLM_NAME)
+    acc = lambda p, m: (p[m].argmax(1) == y[m]).mean() if m.any() else float("nan")
+    rows = [{"to hop": "ENSEMBLE (tang 1)", "macro_f1": f1(p1)},
+            {"to hop": "LLM mot minh", "macro_f1": f1(p2)},
+            {"to hop": f"ensemble + LLM nhu thanh vien thu 7 (TB 0,5/0,5)", "macro_f1": f1(0.5 * p1 + 0.5 * p2)}]
+    for d in (0.1, 0.2, 0.3, 0.5):
+        pc, band = cascade("eval", JOBS, delta=d)
+        rows.append({"to hop": f"CASCADE delta={d}" + ("  <- dang dung" if d == LLM_DELTA else ""),
+                     "macro_f1": f1(pc), "cau vao vung khong chac": int(band.sum()),
+                     "acc ensemble trong vung": round(acc(p1, band), 3), "acc LLM trong vung": round(acc(p2, band), 3)})
+    display(pd.DataFrame(rows).round(4))
+    print("Luu y: chon delta theo bang nay la toi uu tren held-out (639 cau) -> chi nen doi neu chenh ro.")''')
+
 md("""## 8) File nộp
 
 Ensemble với cùng trọng số cho:
 - **bản 90%** → `a_test_final` (và `a_val_final`)
 - **bản 100%** → `a_test_final_full` (và `a_val_final_full`)
+- nếu `USE_LLM`: **2 tầng** → `a_test_final_llm` và `a_test_final_full_llm`
 
 **Nộp file `test`.** File `val` chỉ sinh ra cho đủ bộ: model đã học chính các câu đó.""")
 
@@ -1748,6 +1841,16 @@ for tag, jobs in [("final", JOBS)] + ([("final_full", FULL_JOBS)] if RUN_FULL el
         p = ensemble(split, jobs)
         outs[(tag, split)] = p
         write_submission(df.id.values, p, labels, f"results/submissions/a_{split}_{tag}")
+if USE_LLM:
+    # 2 tang: ensemble (90% hoac 100%) + LLM (ban 90%) trong vung khong chac
+    for tag, jobs in [("final_llm", JOBS)] + ([("final_full_llm", FULL_JOBS)] if RUN_FULL else []):
+        for split, df in (("val", va), ("test", te)):
+            p, band = cascade(split, jobs)
+            outs[(tag, split)] = p
+            write_submission(df.id.values, p, labels, f"results/submissions/a_{split}_{tag}")
+            if split == "test":
+                changed = int((p.argmax(1) != ensemble(split, jobs).argmax(1)).sum())
+                print(f"  {tag}: {int(band.sum())} cau test vao vung khong chac, LLM doi {changed} nhan")
 if RUN_FULL:
     a, b = outs[("final", "test")].argmax(1), outs[("final_full", "test")].argmax(1)
     print(f"\\nban 90% va ban 100% dong y tren {(a == b).mean():.1%} cau test")''')

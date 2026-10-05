@@ -1,0 +1,45 @@
+# Tier 2 of the final pipeline: an instruction-tuned 7B LLM as a classifier (task a).
+#
+# Why: error analysis of the encoder ensemble on task A found 85% of missed Hate carries no slur
+# (stereotypes, sexual innuendo about a named woman, insinuation, calls to violence), i.e. it
+# needs world knowledge and pragmatics that 6k comments cannot teach a 237M encoder. A model
+# pretrained on trillions of tokens has that knowledge; LoRA adapts it to the labels.
+#
+#   python train.py --config configs/llm_qwen7b.yaml --task a
+#
+# How it reads a comment:
+#   prompt  -- the comment wrapped in a fixed instruction frame (data.prompt), identical at train
+#              and predict time; the question sits just before the last token, which is the one
+#              pooling=last reads.
+#   aux_target -- a training-only second head names WHO is attacked (task-B category from
+#              multiclass_train.csv, "none" for Non-Hate), pushing the representation towards
+#              "an attack on a target" rather than "contains an insult".
+#
+# Needs: pip install peft bitsandbytes accelerate. ~5 GB of 4-bit weights + LoRA + activations
+# fit one T4 at batch 8 with gradient checkpointing; one GPU is used (DataParallel is skipped
+# above 1B parameters). checkpoint.save stays none (inherited): a 4-bit/LoRA state_dict does not
+# reload through model.load(); eval.npy / val.npy / test.npy and the submissions are written.
+_base_: llm.yaml
+model:
+  name: Qwen/Qwen2.5-7B-Instruct      # alternatives with the same settings:
+                                     #   meta-llama/Llama-3.1-8B-Instruct (gated: needs HF token)
+                                     #   google/gemma-2-9b-it             (gated)
+  load_in_4bit: true
+  dtype: fp16
+  aux_target: true
+data:
+  max_len: 192                       # comment (<=96 tokens for 98% of rows) + ~45 for the frame
+  prompt: |-
+    Below is a YouTube comment written in Kannada-English code-mixed text (Kannada in Latin script).
+    Comment: "{text}"
+    Question: who is targeted by this comment, and is it hate speech?
+training:
+  epochs: 2
+  early_stopping_patience: 2
+  batch_size: 8
+  grad_accum: 4                      # effective 32
+  eval_batch_size: 16
+  grad_checkpointing: true
+  lr: 1.0e-4
+  head_lr: 1.0e-4
+  target_weight: 0.5

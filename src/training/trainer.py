@@ -82,8 +82,15 @@ class Trainer:
         t = self.t
         feat = self.model.featurizer          # model.hybrid: TF-IDF of each batch, else None
         side = self.model.side_vocab          # model.side_embedding: char/key ids per word, else None
+        # model.aux_target: per-row target ids (-100 = unknown) for the training-only head
+        n_main = self.model.meta["num_labels"]
+        targets = (train_df["target"].tolist()
+                   if self.model.target_n and "target" in train_df.columns else None)
+        if self.model.target_n and targets is None:
+            raise RuntimeError("model.aux_target bat nhung train_df khong co cot `target`")
+        tgt_w = float(t.get("target_weight", 0.5) or 0.0)
         dl_tr = make_loader(train_df.text.tolist(), train_df.y.tolist(), self.tok, self.cfg, train=True,
-                            featurizer=feat, side=side)
+                            featurizer=feat, side=side, targets=targets)
         # No held-out slice (data.use_valdataset: false): nothing to score against, so there is
         # no best epoch to keep and no early stopping. The run trains the full schedule and
         # returns its LAST epoch, which is why `epochs` has to be set deliberately in this mode.
@@ -145,9 +152,12 @@ class Trainer:
             for i, batch in enumerate(dl_tr):
                 batch = {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
                 y = batch.pop("labels")
+                yt = batch.pop("target_labels", None)
                 with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype or torch.float32,
                                     enabled=self.amp_dtype is not None):
                     logits = self.net(**batch)
+                logits, t_logits = ((logits[:, :n_main], logits[:, n_main:])
+                                    if logits.shape[-1] > n_main else (logits, None))
                 # Running train scores, gathered from the forward passes the step already did, so
                 # they cost nothing. They are NOT a clean evaluation: dropout is on and the
                 # weights move between batches, so early-epoch batches are scored by a worse
@@ -155,6 +165,10 @@ class Trainer:
                 # exact number.
                 tr_pred.append(logits.detach().argmax(-1).cpu()); tr_true.append(y.detach().cpu())
                 loss = self.loss_fn(logits.float(), y)
+                if t_logits is not None and yt is not None and bool((yt != -100).any()):
+                    # who is attacked; rows with no known category carry -100 and are skipped
+                    loss = loss + tgt_w * torch.nn.functional.cross_entropy(
+                        t_logits.float(), yt, ignore_index=-100)
                 aux = self.model.aux_loss          # 0.0 unless the head is a sparse MoE
                 if aux_w:
                     loss = loss + aux_w * aux
@@ -170,7 +184,7 @@ class Trainer:
                                         dtype=self.amp_dtype or torch.float32,
                                         enabled=self.amp_dtype is not None):
                         adv = self.net(**batch)
-                    adv_loss = self.loss_fn(adv.float(), y)
+                    adv_loss = self.loss_fn(adv[:, :n_main].float(), y)
                     if aux_w:
                         adv_loss = adv_loss + aux_w * self.model.aux_loss
                     scaler.scale(adv_loss / t["grad_accum"]).backward()

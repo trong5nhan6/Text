@@ -60,7 +60,11 @@ def check_run_dir(run_dir: Path, cfg, overwrite, log) -> bool:
         if training_signature(old) != training_signature(cfg):
             raise SystemExit(f"{run_dir} was trained with a different config. "
                              f"Use another --run_name or pass --overwrite.")
-        if (run_dir / "eval.npy").exists():
+        # Finished = metrics.json written (the last thing a run does) plus its eval.npy -- except a
+        # data.use_valdataset=false run, which by design has no held-out slice and no eval.npy;
+        # without this it was retrained every time its command ran again.
+        scored = use_valdataset(cfg)
+        if (run_dir / "metrics.json").exists() and (not scored or (run_dir / "eval.npy").exists()):
             log(f"{run_dir.name} is already trained -> nothing to do (use --overwrite to redo it)")
             return True
     dump(cfg, cfg_file)
@@ -205,7 +209,8 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
         ck = Path(cfg["paths"]["checkpoint_dir"]) / cfg["task"] / run_dir.name
         model.save(ck, tokenizer, half=cfg["checkpoint"].get("half", True),
                    extra={"epoch": best["epoch"], "macro_f1": best["f1"], "task": cfg["task"],
-                          "labels": label_names(cfg["task"]), "max_len": cfg["data"]["max_len"]})
+                          "labels": label_names(cfg["task"]), "max_len": cfg["data"]["max_len"],
+                          "prompt": cfg["data"].get("prompt")})
         log.info(f"checkpoint -> {ck}")
     return out
 
@@ -238,6 +243,9 @@ def main():
         # task-A validation inputs labelled from the task-B files, added to the fit slice only
         from src.data.preprocessing import add_val_leak
         train = add_val_leak(cfg, train, val, log.info)
+    if cfg["model"].get("aux_target"):
+        from src.data.preprocessing import target_labels
+        train = train.assign(target=target_labels(cfg, train, log.info))
     labels = label_names(cfg["task"])
     set_seed(cfg["seed"])
 

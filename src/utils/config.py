@@ -75,7 +75,8 @@ def text_suffix(cfg: dict) -> str:
     d = cfg.get("data", {})
     tt = d.get("text_type")
     return (("" if tt in (None, "latin") else f"_{tt}") + ("_tta" if d.get("tta") else "")
-            + ("_vl" if d.get("val_leak_labels") else ""))     # fit slice + leak-labelled val
+            + ("_vl" if d.get("val_leak_labels") else "")      # fit slice + leak-labelled val
+            + ("_pr" if d.get("prompt") else ""))              # comment wrapped in a prompt frame
 
 
 _TAG_SKIP = {"checkpoints", "results", "models", ".", ".."}
@@ -132,6 +133,7 @@ def run_name(cfg: dict) -> str:
     # _se-char / _se-phonetic / _se-char-phonetic: the side embedding is a different model too
     se = cfg["model"].get("side_embedding") if cfg["model"]["type"] != "tfidf" else None
     se = f"_se-{se.replace('+', '-')}" if se else ""
+    se += "_tg" if cfg["model"].get("aux_target") and cfg["model"]["type"] != "tfidf" else ""
     # _mix-<tag>[-<tag>]: which tables were mixed in, short enough to read (see _short_tag)
     mix = cfg["model"].get("embed_mix") if cfg["model"]["type"] != "tfidf" else None
     mix = [mix] if isinstance(mix, str) else (mix or [])
@@ -186,6 +188,8 @@ def training_signature(cfg: dict) -> dict:
     if m.get("head") != "mlp":
         m.pop("mlp_dims", None)
         m.pop("mlp_dropout", None)
+    if not m.get("aux_target"):
+        t.pop("target_weight", None)
     if not m.get("embed_mix"):                           # and for the embedding mix's
         m.pop("embed_mix_mode", None)
         m.pop("embed_mix_lr", None)

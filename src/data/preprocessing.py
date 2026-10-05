@@ -228,6 +228,25 @@ def add_val_leak(cfg, train, val, log=print):
     return out[[c for c in out.columns if c in set(train.columns) | {"source"}]]
 
 
+def target_labels(cfg, train, log=print):
+    """model.aux_target (task a): per row, which group the comment attacks -- the task-B
+    category from multiclass_train.csv (same id, same text) -> 0..5 in TASKS['b'] order,
+    6 = none for Non-Hate, -100 for Hate whose category is unknown (its B row is in the
+    unlabelled B validation/test file), which the loss skips. Uses only labelled B train."""
+    if cfg["task"] != "a":
+        raise SystemExit("model.aux_target chi dung cho task a.")
+    raw = Path(cfg["paths"]["raw_dir"])
+    bt = pd.read_csv(_find(raw, TASKS["b"]["train"]), encoding="utf-8-sig", keep_default_na=False)
+    cats = TASKS["b"]["labels"]
+    cat_of = dict(zip(bt["id"], bt[TASKS["b"]["label_col"]].str.strip().map({c: i for i, c in enumerate(cats)})))
+    none = len(cats)
+    t = np.where(train["label"] == "Non-Hate", none, train["id"].map(cat_of).fillna(-100)).astype(int)
+    known = (t >= 0) & (t < none)
+    log(f"aux_target: {int(known.sum())} cau Hate co nhom (tu B train), {int((t == -100).sum())} Hate chua "
+        f"biet nhom (bo qua loss), {int((t == none).sum())} Non-Hate -> none")
+    return t
+
+
 def ensure_processed(cfg, log=print):
     """Build data/processed on demand, and rebuild it when the split settings changed."""
     p = Path(cfg["paths"]["processed_dir"])
