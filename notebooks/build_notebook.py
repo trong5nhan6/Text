@@ -1519,7 +1519,8 @@ md("""## 1) Bảng điều khiển""")
 code('''# ============================== BANG DIEU KHIEN ==============================
 SEEDS    = [42, 43, 44]
 EPOCHS   = 10            # fine-tune; luu epoch tot nhat theo held-out
-VAL_LEAK = True          # them 792 cau val (nhan suy ra tu file B) vao phan fit
+VAL_LEAK = False         # True: them 792 cau val (nhan suy ra tu file B) vao phan fit.
+                         # PHAI khop voi RESULTS_ZIP: zip noleak <-> False, zip leak (_vl) <-> True
 RUN_FULL = True          # them ban 100% (gop held-out vao fit) -- khong cham diem duoc
 
 TRANSFORMERS = [   # (ten, config, model.name -- None = mac dinh cua config)
@@ -1533,8 +1534,8 @@ W_TRANS = 0.6            # trong so nhom transformer; TF-IDF = 1 - W_TRANS
 # checkpoint MLM: thu muc dich -> (ten file zip, Google Drive: DAN NGUYEN LINK chia se hoac chi file id)
 # Link dang https://drive.google.com/file/d/<ID>/view?usp=sharing, che do "Anyone with the link".
 MLM_CKPTS = {
-    'checkpoints/mlm_v2/cnerg-muril': ('checkpoints_mlm_v2_cnerg-muril.zip', ''),   # <- dan link Drive vao ''
-    'checkpoints/mlm_vx/cnerg-muril': ('checkpoints_mlm_vx_cnerg-muril.zip', ''),   # <- dan link Drive vao ''
+    'checkpoints/mlm_v2/cnerg-muril': ('checkpoints_mlm_v2_cnerg-muril.zip', 'https://drive.google.com/file/d/1r5y4vY3jLBpvautjkq5djeJ7sI2ODRtS/view?usp=drive_link'),   # <- dan link Drive vao ''
+    'checkpoints/mlm_vx/cnerg-muril': ('checkpoints_mlm_vx_cnerg-muril.zip', 'https://drive.google.com/file/d/1mGF5eb3B-DdwXoYJOSqPrZC5m4X4oiIe/view?usp=drive_link'),   # <- dan link Drive vao ''
 }
 SUFFIX = f'_e{EPOCHS}'
 
@@ -1543,9 +1544,10 @@ USE_LLM    = True            # them LLM (configs/llm_qwen7b.yaml) va ghep 2 tang
 LLM_CONFIG = 'llm_qwen7b'    # Qwen2.5-7B-Instruct, 4-bit + LoRA, khung prompt + head "doi tuong"
 LLM_DELTA  = 0.2             # cau co |P_ensemble(Hate) - 0,5| < LLM_DELTA = "vung khong chac" -> hoi LLM
 LLM_MIX    = 0.5             # trong vung do: P = LLM_MIX * P_ensemble + (1 - LLM_MIX) * P_LLM (0 = chi LLM)
-# Ket qua cu (tranh train lai): zip results_final_*.zip tu lan chay truoc, Add Input vao notebook.
-# '' = tu tim moi results*.zip trong /kaggle/input.
-RESULTS_ZIP = ''
+# Ket qua cu (tranh train lai): zip results_final_*.zip tu lan chay truoc. Mot trong ba:
+#   link Google Drive (Anyone with the link) | duong dan file trong /kaggle/input | '' = tu tim
+#   moi results*.zip trong /kaggle/input. Link duoi day = results_final_noleak.zip (24 run, VAL_LEAK=False).
+RESULTS_ZIP = 'https://drive.google.com/file/d/1j2Ga6AJ7KU18yk_d-QH8c4GaY2qtVHDO/view?usp=drive_link'
 # ===================================================================================''')
 
 md("""## 2) Lấy checkpoint MLM
@@ -1571,11 +1573,11 @@ def find_ckpt(root, tail):
     return os.path.dirname(hits[0]) if hits else None
 
 def drive_download(link, out):
-    import gdown
-    if link.startswith("http"):
-        gdown.download(url=link, output=out, quiet=False, fuzzy=True)   # fuzzy: nhan ca link /view?usp=sharing
-    else:
-        gdown.download(id=link, output=out, quiet=False)
+    """link chia se Drive (.../file/d/<ID>/view?...) hoac chi <ID>. Tu tach ID roi goi
+    gdown.download(id=...), cach moi phien ban gdown deu ho tro (gdown 6 da bo `fuzzy`)."""
+    import gdown, re
+    m = re.search(r"/d/([\\w-]+)", link) or re.search(r"[?&]id=([\\w-]+)", link)
+    gdown.download(id=m.group(1) if m else link.strip(), output=out, quiet=False)
     if not zipfile.is_zipfile(out):
         raise SystemExit(f"{out} khong phai file zip -- kiem tra link Drive da de 'Anyone with the link' chua")
 
@@ -1675,7 +1677,24 @@ cấu hình), nên các cell train phía sau **chỉ train phần còn thiếu**
 - thiếu run nào → train bù run đó trước, rồi mới train LLM.""")
 
 code('''import os, glob, re, zipfile
-zips = [RESULTS_ZIP] if RESULTS_ZIP else sorted(glob.glob("/kaggle/input/**/results*.zip", recursive=True))
+if RESULTS_ZIP.startswith("http"):                         # link Google Drive -> tai ve
+    import gdown
+    local = "/kaggle/working/results_prev.zip"
+    if not os.path.isfile(local):
+        m = re.search(r"/d/([\\w-]+)", RESULTS_ZIP) or re.search(r"[?&]id=([\\w-]+)", RESULTS_ZIP)
+        gdown.download(id=m.group(1), output=local, quiet=False)
+    if not zipfile.is_zipfile(local):
+        raise SystemExit("file tai tu RESULTS_ZIP khong phai zip -- link da de 'Anyone with the link' chua?")
+    zips = [local]
+else:
+    zips = [RESULTS_ZIP] if RESULTS_ZIP else sorted(glob.glob("/kaggle/input/**/results*.zip", recursive=True))
+for zp in zips:                                             # zip phai cung che do val-leak voi notebook
+    with zipfile.ZipFile(zp) as z:
+        runs = {m.group(1) for x in z.namelist() for m in [re.match(r"(?:.*/)?results/a/([^/]+)/", x)] if m}
+    has_vl = any("_vl" in r for r in runs)
+    if runs and has_vl != VAL_LEAK:
+        print(f"!! {os.path.basename(zp)} la ban {'CO' if has_vl else 'KHONG'} val-leak nhung VAL_LEAK={VAL_LEAK}: "
+              f"ten run se khong khop -> moi run se bi TRAIN LAI. Doi VAL_LEAK={has_vl} de dung lai ket qua.")
 restored = 0
 for zp in zips:
     with zipfile.ZipFile(zp) as z:
