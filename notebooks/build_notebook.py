@@ -1540,10 +1540,56 @@ MLM_CKPTS = {
 SUFFIX = f'_e{EPOCHS}'
 
 # ---- TANG 2: LLM ----------------------------------------------------------------
-USE_LLM    = True            # them LLM (configs/llm_qwen7b.yaml) va ghep 2 tang
-LLM_CONFIG = 'llm_qwen7b'    # Qwen2.5-7B-Instruct, 4-bit + LoRA, khung prompt + head "doi tuong"
+USE_LLM    = True            # them LLM va ghep 2 tang
 LLM_DELTA  = 0.2             # cau co |P_ensemble(Hate) - 0,5| < LLM_DELTA = "vung khong chac" -> hoi LLM
 LLM_MIX    = 0.5             # trong vung do: P = LLM_MIX * P_ensemble + (1 - LLM_MIX) * P_LLM (0 = chi LLM)
+LLM_MODE   = 'finetune'      # 'finetune' = train LoRA + head (~1 gio voi 7B)
+                             # 'zeroshot' = KHONG train: dinh nghia nhan + binh luan -> so P("Hate") voi P("Non-Hate")
+                             # 'fewshot'  = KHONG train: nhu zeroshot + LLM_K cau giong nhat trong phan fit kem nhan
+LLM_K      = 8               # fewshot: so vi du moi cau (8-16; nhieu hon = prompt dai, cham hon)
+LLM_SCOPE  = 'band'          # zeroshot/fewshot: cau nao dua cho LLM cham
+                             #   'band' = CHI cau ensemble khong chac (|P - 0,5| < LLM_DELTA) -> nhanh ~4 lan, chi dung cho 2 tang
+                             #   'all'  = MOI cau held-out/val/test -> them file nop a_test_final_llmonly (LLM tu quyet ca file test)
+                             # (finetune luon du doan moi cau: phan du doan re so voi phan train)
+
+# ---- cau hinh train LLM ------------------------------------------------------------
+# Chon 1 PRESET theo suc GPU; moi preset da chon san model + 4-bit + batch phu hop 1 T4 (15 GB).
+#   qwen7b   Qwen2.5-7B-Instruct   4-bit, batch 8x4, grad ckpt   ~1-1,5 gio   (manh nhat)
+#   qwen3b   Qwen2.5-3B-Instruct   fp16,  batch 8x4, grad ckpt   ~40 phut
+#   qwen1.5b Qwen2.5-1.5B-Instruct fp16,  batch 16x2             ~20 phut
+#   qwen0.5b Qwen2.5-0.5B-Instruct fp16,  batch 32x1             ~10 phut     (thu nhanh / CPU)
+#   sarvam2b sarvamai/sarvam-1 (2B, chuyen tieng An Do) fp16, batch 8x4, grad ckpt
+# Neu loss ra NaN voi fp16 (Qwen duoc train bf16, T4 khong co bf16): bat LLM_4BIT = True.
+LLM_PRESET = 'qwen7b'
+LLM_PRESETS = {
+    'qwen7b':   dict(model='Qwen/Qwen2.5-7B-Instruct',   four_bit=True,  batch=8,  accum=4, ckpt=True,  lr=1e-4),
+    'qwen3b':   dict(model='Qwen/Qwen2.5-3B-Instruct',   four_bit=False, batch=8,  accum=4, ckpt=True,  lr=1e-4),
+    'qwen1.5b': dict(model='Qwen/Qwen2.5-1.5B-Instruct', four_bit=False, batch=16, accum=2, ckpt=False, lr=2e-4),
+    'qwen0.5b': dict(model='Qwen/Qwen2.5-0.5B-Instruct', four_bit=False, batch=32, accum=1, ckpt=False, lr=2e-4),
+    'sarvam2b': dict(model='sarvamai/sarvam-1',          four_bit=False, batch=8,  accum=4, ckpt=True,  lr=1e-4),
+}
+_p = LLM_PRESETS[LLM_PRESET]
+
+# ---- tung tham so (mac dinh lay tu preset; sua truc tiep o day de ghi de) ------------
+LLM_MODEL       = _p['model']     # hoac dan ten model HuggingFace bat ky (LLM giai ma, co q_proj/v_proj...)
+LLM_4BIT        = _p['four_bit']  # nap trong so 4-bit (bat buoc voi 7B tren T4)
+LLM_BATCH       = _p['batch']     # cau / buoc tren 1 GPU. OOM -> chia doi
+LLM_GRAD_ACCUM  = _p['accum']     # cong don gradient: batch hieu dung = LLM_BATCH x LLM_GRAD_ACCUM
+LLM_GRAD_CKPT   = _p['ckpt']      # tinh lai activation luc backward: it bo nho hon, cham hon ~30%
+LLM_LR          = _p['lr']        # lr cua LoRA + head
+LLM_LORA_R      = 16              # hang cua LoRA (8 / 16 / 32): lon hon = nhieu tham so train hon
+LLM_LORA_ALPHA  = 32              # he so scale cua LoRA, thuong = 2 x LLM_LORA_R
+LLM_LORA_DROP   = 0.05            # dropout trong LoRA
+LLM_EPOCHS      = 2               # so epoch (cung la do dai lich LR); luu epoch tot nhat theo held-out
+LLM_MAX_LEN     = 192             # token = binh luan (<=96 cho 98% cau) + khung prompt (~45)
+LLM_AUX_TARGET  = True            # head phu "doi tuong bi tan cong" (nhom Task B), chi dung khi train
+LLM_TARGET_W    = 0.5             # trong so loss cua head phu
+LLM_SEED        = 42
+LLM_PROMPT = (                    # khung bao moi binh luan; {text} = binh luan. Giong het luc train va du doan.
+    'Below is a YouTube comment written in Kannada-English code-mixed text (Kannada in Latin script).\\n'
+    'Comment: "{text}"\\n'
+    'Question: who is targeted by this comment, and is it hate speech?'
+)
 # Ket qua cu (tranh train lai): zip results_final_*.zip tu lan chay truoc. Mot trong ba:
 #   link Google Drive (Anyone with the link) | duong dan file trong /kaggle/input | '' = tu tim
 #   moi results*.zip trong /kaggle/input. Link duoi day = results_final_noleak.zip (24 run, VAL_LEAK=False).
@@ -1762,22 +1808,130 @@ if RUN_FULL:
         !python train.py --config configs/{conf}.yaml --task a --set {args}{extra}
     print(f"\\nxong trong {(time.time() - t0) / 60:.1f} phut")''')
 
+md("""Ensemble (tầng 1) = trung bình seed → trung bình model trong nhóm → `W_TRANS` × transformer +
+(1 − `W_TRANS`) × TF-IDF. Định nghĩa ở đây vì tầng 2 cần nó để biết câu nào không chắc.""")
+
+code('''import numpy as np
+P = lambda name, split="eval": np.load(f"results/a/{name}/{split}.npy")
+def model_probs(split, jobs, label):
+    return np.mean([P(n, split) for g, l, *_, n in jobs if l == label], axis=0)
+def group_probs(split, jobs, group, drop=()):
+    labels = [l for l, *_ in TRANSFORMERS] if group == "trans" else TFIDF
+    return np.mean([model_probs(split, jobs, l) for l in labels if l not in drop], axis=0)
+def ensemble(split, jobs, w=W_TRANS, drop=()):
+    return w * group_probs(split, jobs, "trans", drop) + (1 - w) * group_probs(split, jobs, "tfidf", drop)
+for split in ("eval", "val", "test"):
+    p1 = ensemble(split, JOBS)
+    print(f"{split:4s}: {len(p1)} cau, {int((np.abs(p1[:, 1] - 0.5) < LLM_DELTA).sum())} cau khong chac (delta {LLM_DELTA})")''')
+
 md("""## 6b) Tầng 2 — LLM (nếu `USE_LLM`)
 
-Qwen2.5-7B-Instruct nạp **4-bit**, chỉ train **LoRA** (khoảng 40M tham số) + 2 head: **Hate/Non-Hate**
-và **"đối tượng bị tấn công"** (nhóm của Task B; chỉ dùng khi train). Mỗi bình luận được bọc trong
-khung prompt cố định (xem `configs/llm_qwen7b.yaml`). Chạy trên 1 T4, khoảng 1–1,5 giờ. Đã có kết
-quả (từ zip) thì tự bỏ qua.""")
+Mọi tham số nằm trong khối `LLM_*` của bảng điều khiển. Cell dưới ghi chúng ra
+`configs/llm_notebook.yaml` (kế thừa `configs/llm_qwen7b.yaml`) rồi train bằng file đó.
 
-code('''LLM_NAME = None
-if USE_LLM:
+| Tham số | Mặc định | Ý nghĩa | Khi nào đổi |
+|---|---|---|---|
+| `LLM_PRESET` | `qwen7b` | chọn sẵn model + 4-bit + batch cho 1 T4: `qwen7b`, `qwen3b`, `qwen1.5b`, `qwen0.5b`, `sarvam2b` | **không train nổi 7B** (OOM, hết thời gian) → `qwen3b`, rồi `qwen1.5b` |
+| `LLM_MODEL` | theo preset | LLM làm encoder | dán tên model khác (Llama-3.1-8B, Gemma-2-9B cần HF token) |
+| `LLM_4BIT` | True | nạp trọng số 4-bit | bắt buộc với 7B trên T4 |
+| `LLM_LORA_R` / `_ALPHA` / `_DROP` | 16 / 32 / 0,05 | kích thước LoRA (chỉ phần này + head được train) | r=32 nếu LLM học chưa đủ; r=8 nếu overfit |
+| `LLM_EPOCHS` | 2 | số epoch | 3 nếu eval F1 còn tăng ở epoch cuối |
+| `LLM_LR` | 1e-4 | learning rate | 5e-5 nếu loss dao động |
+| `LLM_BATCH` × `LLM_GRAD_ACCUM` | 8 × 4 | batch hiệu dụng 32 | OOM → 4 × 8 |
+| `LLM_MAX_LEN` | 192 | độ dài tối đa (token) | giảm nếu OOM |
+| `LLM_GRAD_CKPT` | True | tiết kiệm bộ nhớ | tắt nếu dư VRAM (nhanh hơn ~30%) |
+| `LLM_AUX_TARGET` / `LLM_TARGET_W` | True / 0,5 | head phụ "đối tượng bị tấn công" | 0 = tắt, để đo xem head phụ có giúp không |
+| `LLM_PROMPT` | khung tiếng Anh | câu bọc mỗi bình luận | phải giữ `{text}` |
+
+Tên run tự thêm hậu tố theo các giá trị khác mặc định, nên đổi tham số không đè lên lần train trước.
+Đã có kết quả (từ zip) thì tự bỏ qua. Trên 1 T4, khoảng 1–1,5 giờ với mặc định.
+
+**Không train (`LLM_MODE = 'zeroshot'` / `'fewshot'`)**: chạy `llm_prompt.py` thay vì `train.py`.
+Chỉ dùng `LLM_MODEL`, `LLM_4BIT`, `LLM_K` và `VAL_LEAK` (các tham số train bị bỏ qua); model phải là bản
+*-Instruct (có chat template, nên `sarvam2b` không dùng được).
+
+- LLM không sinh câu trả lời: P(Hate) = softmax của logit token đầu của "Hate" và "Non-Hate".
+- `fewshot`: mỗi câu kèm `LLM_K` câu **giống nhất** trong phần fit (TF-IDF n-gram ký tự), có nhãn.
+  Ví dụ chỉ lấy từ phần fit, không bao giờ từ held-out, nên điểm held-out vẫn trung thực.
+- LLM chưa train thường lệch hẳn về một nhãn. Vì vậy điểm được dời một hằng số sao cho tỉ lệ đoán Hate
+  trên held-out bằng tỉ lệ Hate của phần fit (~49%). Bước này chỉ dùng tỉ lệ nhãn, không dùng nhãn
+  held-out. `metrics.json` ghi cả F1 trước và sau hiệu chỉnh.
+- 7B 4-bit trên 1 T4: zeroshot ~10–15 phút, fewshot k=8 ~30–40 phút cho 3 tập (639 + 806 + 806 câu).
+
+`LLM_SCOPE` (chỉ cho zeroshot/fewshot) chọn câu nào đưa cho LLM:
+
+| `LLM_SCOPE` | LLM chấm | Thời gian (7B, fewshot k=8) | Dùng được cho |
+|---|---|---|---|
+| `'band'` | chỉ câu ensemble **không chắc** (\\|P − 0,5\\| < `LLM_DELTA`), khoảng 1/4 số câu | ~10 phút | 2 tầng (`a_test_final_llm`) |
+| `'all'` | **mọi** câu held-out/val/test | ~30–40 phút | 2 tầng + **LLM một mình** (`a_test_final_llmonly`) |
+
+- Với `'band'`, câu ngoài band giữ xác suất của ensemble. Vì vậy hàng "LLM một mình" trong bảng mục 7
+  chính là "2 tầng với `LLM_MIX` = 0".
+- Đổi `LLM_DELTA` thì phải chấm lại: tên run có `_band<delta>`, nên lần chấm cũ không bị đè.
+- Band gồm câu không chắc của bản 90% **hoặc** bản 100% (nếu `RUN_FULL`), nên cả hai file 2 tầng đều dùng được.
+
+Đây là phép thử rẻ: nếu few-shot đã sửa được nhiều lỗi trong vùng không chắc (bảng ghép 2 tầng ở mục 7),
+có thể không cần fine-tune.""")
+
+code('''import yaml
+LLM_NAME = None
+if USE_LLM and LLM_MODE in ("zeroshot", "fewshot"):
+    if LLM_4BIT:
+        !pip -q install bitsandbytes accelerate
+    assert LLM_SCOPE in ("band", "all"), f"LLM_SCOPE phai la band / all, khong phai {LLM_SCOPE!r}"
+    from llm_prompt import default_run_name
+    band_args = ""
+    if LLM_SCOPE == "band":
+        # cau khong chac cua ensemble 90% HOAC 100%; ngoai band LLM giu xac suat cua ensemble 90%
+        z = {}
+        for split in ("eval", "val", "test"):
+            p1 = ensemble(split, JOBS)
+            mask = np.abs(p1[:, 1] - 0.5) < LLM_DELTA
+            if split != "eval" and FULL_JOBS:                      # ban 100% khong co eval
+                mask |= np.abs(ensemble(split, FULL_JOBS)[:, 1] - 0.5) < LLM_DELTA
+            z[f"{split}_p1"], z[f"{split}_mask"] = p1, mask
+            print(f"  {split}: LLM cham {int(mask.sum())}/{len(mask)} cau")
+        np.savez("results/llm_band.npz", **z)
+        band_args = f"--band_file results/llm_band.npz --band_delta {LLM_DELTA}"
+    LLM_NAME = default_run_name(LLM_MODEL, LLM_MODE, LLM_K, VAL_LEAK, LLM_DELTA if LLM_SCOPE == "band" else None)
+    print("LLM run:", LLM_NAME, "(da co -> bo qua)" if is_done(LLM_NAME) else "(khong train)")
+    if not is_done(LLM_NAME):
+        t0 = time.time()
+        !python llm_prompt.py --model {LLM_MODEL} --mode {LLM_MODE} --k {LLM_K} --seed {LLM_SEED} {"--load_in_4bit" if LLM_4BIT else ""} {"--val_leak" if VAL_LEAK else ""} {band_args}
+        print(f"-> {(time.time() - t0) / 60:.1f} phut")
+    if not is_done(LLM_NAME):
+        raise SystemExit("LLM chua co ket qua -- xem log o tren (OOM? model khong co chat template?)")
+elif USE_LLM:
+    assert LLM_MODE == "finetune", f"LLM_MODE phai la finetune / zeroshot / fewshot, khong phai {LLM_MODE!r}"
     !pip -q install peft bitsandbytes accelerate
-    llm_sets = VL
-    LLM_NAME = name_of(LLM_CONFIG, llm_sets)
+    # bang dieu khien -> file config (prompt nhieu dong co ':' va '"' nen khong truyen qua --set)
+    llm_cfg = {
+        "_base_": "llm_qwen7b.yaml",
+        "model": {"name": LLM_MODEL, "load_in_4bit": bool(LLM_4BIT) or None, "aux_target": bool(LLM_AUX_TARGET) or None,
+                  "lora": {"r": LLM_LORA_R, "alpha": LLM_LORA_ALPHA, "dropout": LLM_LORA_DROP}},
+        "data": {"max_len": LLM_MAX_LEN, "prompt": LLM_PROMPT, "val_leak_labels": bool(VAL_LEAK) or None},
+        "training": {"epochs": LLM_EPOCHS, "early_stopping_patience": LLM_EPOCHS, "lr": LLM_LR,
+                     "head_lr": LLM_LR, "batch_size": LLM_BATCH, "grad_accum": LLM_GRAD_ACCUM,
+                     "grad_checkpointing": bool(LLM_GRAD_CKPT), "target_weight": LLM_TARGET_W},
+    }
+    yaml.safe_dump(llm_cfg, open("configs/llm_notebook.yaml", "w", encoding="utf-8"),
+                   allow_unicode=True, sort_keys=False)
+    # hau to ten run: chi ghi gia tri khac mac dinh, de lan train khac tham so khong de len nhau
+    base = yaml.safe_load(open("configs/llm_qwen7b.yaml", encoding="utf-8"))
+    llm_suffix = ""
+    for tag, val, dflt in (("m", LLM_MODEL.split("/")[-1].lower()[:14], "qwen2.5-7b-ins"),
+                           ("e", LLM_EPOCHS, base["training"]["epochs"]), ("lr", LLM_LR, _p["lr"]),
+                           ("bs", LLM_BATCH * LLM_GRAD_ACCUM, 32), ("q", int(LLM_4BIT), int(_p["four_bit"])),
+                           ("r", LLM_LORA_R, 16), ("len", LLM_MAX_LEN, base["data"]["max_len"]),
+                           ("tw", LLM_TARGET_W, base["training"]["target_weight"])):
+        if val != dflt:
+            llm_suffix += f"_{tag}{val:g}" if isinstance(val, (int, float)) else f"_{tag}{re.sub(r'[^a-z0-9.-]', '', val)}"
+    llm_suffix = llm_suffix or None
+    LLM_NAME = run_name(load_config("configs/llm_notebook.yaml", task="a", seed=LLM_SEED, run_suffix=llm_suffix))
     print("LLM run:", LLM_NAME, "(da co -> bo qua)" if is_done(LLM_NAME) else "")
+    print(yaml.safe_dump(llm_cfg, allow_unicode=True, sort_keys=False))
     t0 = time.time()
-    args = " ".join(llm_sets)
-    !python train.py --config configs/{LLM_CONFIG}.yaml --task a {"--set " + args if args else ""}
+    !python train.py --config configs/llm_notebook.yaml --task a --seed {LLM_SEED} {"--run_suffix " + llm_suffix if llm_suffix else ""}
     print(f"-> {(time.time() - t0) / 60:.1f} phut")
     if not is_done(LLM_NAME):
         raise SystemExit("LLM chua co ket qua -- xem log o tren (OOM? thieu peft/bitsandbytes?)")''')
@@ -1788,22 +1942,12 @@ Từng run, trung bình seed của từng model, từng nhóm, ensemble cuối, 
 model. Lát held-out có 639 câu, nên chênh lệch dưới khoảng 0,02 là trong mức nhiễu. **Đừng chọn
 `W` theo bảng này**: đó chính là tối ưu trên held-out mà ta đang tránh.""")
 
-code('''import numpy as np
-from sklearn.metrics import f1_score
+code('''from sklearn.metrics import f1_score
 y = tr.y.to_numpy()[tr.is_val.to_numpy() == 1]
 f1 = lambda p: f1_score(y, p.argmax(1), average="macro")
-P = lambda name, split="eval": np.load(f"results/a/{name}/{split}.npy")
 
 rows = [{"run": n, "nhom": g, "model": l, "macro_f1": round(f1(P(n)), 4)} for g, l, *_, n in JOBS]
 display(pd.DataFrame(rows))
-
-def model_probs(split, jobs, label):
-    return np.mean([P(n, split) for g, l, *_, n in jobs if l == label], axis=0)
-def group_probs(split, jobs, group, drop=()):
-    labels = [l for l, *_ in TRANSFORMERS] if group == "trans" else TFIDF
-    return np.mean([model_probs(split, jobs, l) for l in labels if l not in drop], axis=0)
-def ensemble(split, jobs, w=W_TRANS, drop=()):
-    return w * group_probs(split, jobs, "trans", drop) + (1 - w) * group_probs(split, jobs, "tfidf", drop)
 
 summary = [{"to hop": f"{l} (TB {len(SEEDS)} seed)", "macro_f1": f1(model_probs("eval", JOBS, l))} for l, *_ in TRANSFORMERS]
 summary += [{"to hop": "nhom transformer", "macro_f1": f1(group_probs("eval", JOBS, "trans"))},
@@ -1828,13 +1972,16 @@ code('''def cascade(split, jobs, delta=LLM_DELTA, mix=LLM_MIX):
     p[band] = mix * p1[band] + (1 - mix) * p2[band]
     return p, band
 
+LLM_BAND_ONLY = USE_LLM and LLM_MODE != "finetune" and LLM_SCOPE == "band"
 if USE_LLM:
     p1, p2 = ensemble("eval", JOBS), P(LLM_NAME)
     acc = lambda p, m: (p[m].argmax(1) == y[m]).mean() if m.any() else float("nan")
     rows = [{"to hop": "ENSEMBLE (tang 1)", "macro_f1": f1(p1)},
-            {"to hop": "LLM mot minh", "macro_f1": f1(p2)},
+            {"to hop": "LLM mot minh" + (" (= 2 tang, mix 0: LLM chi cham trong band)" if LLM_BAND_ONLY else ""), "macro_f1": f1(p2)},
             {"to hop": f"ensemble + LLM nhu thanh vien thu 7 (TB 0,5/0,5)", "macro_f1": f1(0.5 * p1 + 0.5 * p2)}]
-    for d in (0.1, 0.2, 0.3, 0.5):
+    for d in sorted({0.1, 0.2, 0.3, 0.5, LLM_DELTA}):
+        if LLM_BAND_ONLY and d > LLM_DELTA:                        # ngoai band LLM chua cham
+            continue
         pc, band = cascade("eval", JOBS, delta=d)
         rows.append({"to hop": f"CASCADE delta={d}" + ("  <- dang dung" if d == LLM_DELTA else ""),
                      "macro_f1": f1(pc), "cau vao vung khong chac": int(band.sum()),
@@ -1848,6 +1995,7 @@ Ensemble với cùng trọng số cho:
 - **bản 90%** → `a_test_final` (và `a_val_final`)
 - **bản 100%** → `a_test_final_full` (và `a_val_final_full`)
 - nếu `USE_LLM`: **2 tầng** → `a_test_final_llm` và `a_test_final_full_llm`
+- nếu `USE_LLM` và LLM đã chấm **mọi** câu (finetune, hoặc `LLM_SCOPE = 'all'`): **LLM một mình** → `a_test_final_llmonly`
 
 **Nộp file `test`.** File `val` chỉ sinh ra cho đủ bộ: model đã học chính các câu đó.""")
 
@@ -1870,6 +2018,14 @@ if USE_LLM:
             if split == "test":
                 changed = int((p.argmax(1) != ensemble(split, jobs).argmax(1)).sum())
                 print(f"  {tag}: {int(band.sum())} cau test vao vung khong chac, LLM doi {changed} nhan")
+    if not LLM_BAND_ONLY:
+        # LLM tu quyet ca file (khong dung ensemble)
+        for split, df in (("val", va), ("test", te)):
+            p = P(LLM_NAME, split)
+            outs[("final_llmonly", split)] = p
+            write_submission(df.id.values, p, labels, f"results/submissions/a_{split}_final_llmonly")
+        changed = int((outs[("final_llmonly", "test")].argmax(1) != outs[("final", "test")].argmax(1)).sum())
+        print(f"  final_llmonly: LLM mot minh khac ensemble o {changed}/{len(te)} cau test")
 if RUN_FULL:
     a, b = outs[("final", "test")].argmax(1), outs[("final_full", "test")].argmax(1)
     print(f"\\nban 90% va ban 100% dong y tren {(a == b).mean():.1%} cau test")''')
