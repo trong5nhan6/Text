@@ -1448,3 +1448,317 @@ for split in ('val', 'test'):
 !ls -lh /kaggle/working/results_vocab_ext.zip''')
 
 write("vocab_ext.ipynb")
+
+
+# =====================================================================================
+# =====================================================================================
+#  Notebook 7 -- FINAL, task A: 3 transformers x 3 seeds + 3 TF-IDF, fixed-weight ensemble,
+#  fit slice extended with the leak-labelled validation inputs, plus 100%-data versions.
+# =====================================================================================
+md(f"""# FINAL — Task A (Hate / Non-Hate)
+
+**Settings:** Accelerator = **GPU T4 ×2** · Internet = **On** · khoảng 3–3,5 giờ nếu chạy hết
+
+## Dữ liệu
+```
+binary_train.csv ── làm sạch, bỏ trùng ──► 6.386 câu ─┬─► HELD-OUT 639 câu   (chấm điểm; KHÔNG BAO GIỜ đổi)
+                                                      └─► FIT 5.747 câu
+binary_validation_inputs.csv (806, không nhãn)                   │
+   gán nhãn theo cấu trúc A–B: id có trong file B → Hate (395)   │
+                               ngược lại          → Non-Hate (411)│
+   bỏ 14 câu trùng train ──────────────── thêm 792 câu ───────────┘──► FIT 6.539 câu
+hastika_binary_test.csv (806) ──► CHỈ để dự đoán. Nhãn test luôn do MODEL đoán.
+```
+
+## Model và ensemble
+```
+            ┌ ① cnerg_muril gốc              × 3 seed ─ TB ┐
+câu ──┬──►  ├ ② cnerg_muril + MLM bản 2      × 3 seed ─ TB ┼─ TB ─► P_trans ─┐
+      │     └ ③ cnerg_muril + MLM + vocab    × 3 seed ─ TB ┘                 ├─ W·P_trans + (1−W)·P_tfidf ─► nhãn
+      └──►    ④ TF-IDF LR   ⑤ TF-IDF SVM   ⑥ TF-IDF SGD ──────── TB ─► P_tfidf ┘
+```
+- **Tầng 1:** trung bình 3 seed của mỗi transformer. **Tầng 2:** trung bình trong mỗi nhóm.
+  **Tầng 3:** trộn hai nhóm với trọng số **cố định** `W` (không tối ưu trên held-out).
+- **Bản 90%:** chấm điểm được trên held-out. **Bản 100% (`_full`):** gộp cả held-out vào fit,
+  dùng đúng số epoch / C mà bản 90% đã chọn, nên không chấm điểm được.
+
+> ⚠️ **Phải khai báo trong system paper:** nhãn của 806 câu val được **suy ra** từ việc id có mặt
+> trong file Task B (gồm cả file B test), không phải nhãn do ban tổ chức công bố. Quy tắc này đúng
+> 100% trên A train (3.160/3.160 Hate, 0/3.286 Non-Hate). File nộp **val** của notebook này **vô
+> nghĩa để đánh giá** vì model đã học chính các câu đó. File nộp **test** mới là bài nộp.""")
+
+code(f'''import os, subprocess, sys
+
+REPO, BRANCH, WORK = "{REPO}", "{BRANCH}", "/kaggle/working"
+TOKEN = ""
+try:
+    from kaggle_secrets import UserSecretsClient
+    TOKEN = UserSecretsClient().get_secret("GH_TOKEN")
+except Exception:
+    pass
+url = f"https://{{TOKEN + '@' if TOKEN else ''}}github.com/{{REPO}}.git"
+hide = (lambda s: s.replace(TOKEN, "***")) if TOKEN else (lambda s: s)
+
+os.chdir(WORK)
+cmd = (["git", "-C", "repo", "pull", "--ff-only"] if os.path.isdir("repo/.git")
+       else ["git", "clone", "--depth", "1", "-b", BRANCH, url, "repo"])
+r = subprocess.run(cmd, capture_output=True, text=True)
+print(hide((r.stdout + r.stderr).strip()))
+if r.returncode:
+    raise SystemExit("git that bai -- kiem tra Internet = On, repo Public")
+
+os.chdir(f"{{WORK}}/repo"); sys.path.insert(0, os.getcwd())
+print(subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip())''')
+
+code('''!pip -q install ftfy sentencepiece gdown
+!nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+!ls data/raw''')
+
+md("""## 1) Bảng điều khiển""")
+
+code('''# ============================== BANG DIEU KHIEN ==============================
+SEEDS    = [42, 43, 44]
+EPOCHS   = 10            # fine-tune; luu epoch tot nhat theo held-out
+VAL_LEAK = True          # them 792 cau val (nhan suy ra tu file B) vao phan fit
+RUN_FULL = True          # them ban 100% (gop held-out vao fit) -- khong cham diem duoc
+
+TRANSFORMERS = [   # (ten, config, model.name -- None = mac dinh cua config)
+    ('cnerg',  'cnerg_muril', None),
+    ('mlm_v2', 'cnerg_muril', 'checkpoints/mlm_v2/cnerg-muril'),
+    ('mlm_vx', 'cnerg_muril', 'checkpoints/mlm_vx/cnerg-muril'),
+]
+TFIDF   = ['lr', 'svm', 'sgd']
+W_TRANS = 0.6            # trong so nhom transformer; TF-IDF = 1 - W_TRANS
+
+# checkpoint MLM: thu muc dich -> (ten file zip, Google Drive: DAN NGUYEN LINK chia se hoac chi file id)
+# Link dang https://drive.google.com/file/d/<ID>/view?usp=sharing, che do "Anyone with the link".
+MLM_CKPTS = {
+    'checkpoints/mlm_v2/cnerg-muril': ('checkpoints_mlm_v2_cnerg-muril.zip', ''),   # <- dan link Drive vao ''
+    'checkpoints/mlm_vx/cnerg-muril': ('checkpoints_mlm_vx_cnerg-muril.zip', ''),   # <- dan link Drive vao ''
+}
+SUFFIX = f'_e{EPOCHS}'
+# ===================================================================================''')
+
+md("""## 2) Lấy checkpoint MLM
+
+Hai checkpoint (mỗi cái khoảng 0,9 GB): `mlm_v2/cnerg-muril` (MLM bản 2) và `mlm_vx/cnerg-muril`
+(MLM + mở rộng vocab). Cell dưới thử lần lượt:
+
+1. **Kaggle Dataset đã giải nén** (*Add Input*): tìm `…/mlm_v2/cnerg-muril/config.json` ở **mọi độ
+   sâu** trong `/kaggle/input`, rồi trỏ tới (symlink, không chép).
+2. **File zip** trong `/kaggle/input`, hoặc **tải từ Google Drive** (dán link vào `MLM_CKPTS`).
+
+File zip có thể có **lớp thư mục bọc ngoài** hoặc không, ví dụ
+`checkpoints_mlm_v2_cnerg-muril/checkpoints/mlm_v2/cnerg-muril/…` (nén lại sau khi giải nén trên
+Windows) hoặc `checkpoints/mlm_v2/cnerg-muril/…` (zip gốc từ Kaggle). Cell giải nén vào thư mục
+tạm, **tìm** đúng thư mục chứa `config.json`, rồi chuyển về `checkpoints/mlm_v2/cnerg-muril`. Cả hai
+dạng đều chạy được.""")
+
+code('''import glob, zipfile, shutil, json
+
+def find_ckpt(root, tail):
+    """thu muc chua config.json co duong dan ket thuc bang `tail`, o bat ky do sau nao"""
+    hits = sorted(glob.glob(f"{root}/**/{tail}/config.json", recursive=True), key=len)
+    return os.path.dirname(hits[0]) if hits else None
+
+def drive_download(link, out):
+    import gdown
+    if link.startswith("http"):
+        gdown.download(url=link, output=out, quiet=False, fuzzy=True)   # fuzzy: nhan ca link /view?usp=sharing
+    else:
+        gdown.download(id=link, output=out, quiet=False)
+    if not zipfile.is_zipfile(out):
+        raise SystemExit(f"{out} khong phai file zip -- kiem tra link Drive da de 'Anyone with the link' chua")
+
+for d, (zname, drive) in MLM_CKPTS.items():
+    if os.path.isfile(f"{d}/config.json"):
+        print("da co:", d); continue
+    tail = d.split("checkpoints/", 1)[1]                       # vd mlm_v2/cnerg-muril
+    src = find_ckpt("/kaggle/input", tail)
+    if src:                                                    # 1) dataset da giai nen
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        os.symlink(src, d)
+        print(f"{d} -> {src} (symlink)"); continue
+    zips = glob.glob(f"/kaggle/input/**/{zname}", recursive=True)
+    if zips:                                                   # 2a) zip trong /kaggle/input
+        z, downloaded = zips[0], False
+    elif drive:                                                # 2b) tai tu Drive
+        z, downloaded = f"/kaggle/working/{zname}", True
+        print(f"tai {zname} tu Google Drive ...", flush=True)
+        drive_download(drive, z)
+    else:
+        print(f"!! THIEU {d}: Add Input mot Kaggle Dataset co {zname}, hoac dan link Drive vao MLM_CKPTS")
+        continue
+    tmp = f"/kaggle/working/_unzip/{tail.replace('/', '_')}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    with zipfile.ZipFile(z) as zf:
+        print("  trong zip:", sorted({n.split('/')[0] for n in zf.namelist()}))
+        zf.extractall(tmp)
+    src = find_ckpt(tmp, tail)
+    if not src:
+        raise SystemExit(f"khong tim thay .../{tail}/config.json trong {z}")
+    os.makedirs(os.path.dirname(d), exist_ok=True)
+    shutil.move(src, d)
+    shutil.rmtree(tmp, ignore_errors=True)
+    if downloaded:
+        os.remove(z)                                           # 0,9 GB khong can nua
+    print(f"{d} <- {src.replace(tmp, '<zip>')}")
+
+# kiem tra: config + tokenizer doc duoc, vocab khop bang embedding
+from transformers import AutoTokenizer
+for _, _, m in TRANSFORMERS:
+    if not m:
+        continue
+    if not os.path.isfile(f"{m}/config.json"):
+        raise SystemExit(f"chua co {m} -- xem cell tren")
+    v = json.load(open(f"{m}/config.json"))["vocab_size"]
+    tok = AutoTokenizer.from_pretrained(m)
+    print(f"OK {m}: vocab {v:,} | tokenizer {len(tok):,} | 'maklu' -> {tok.tokenize('maklu')}")
+print("du checkpoint")''')
+
+md("""## 3) Kiểm tra dữ liệu
+
+Chạy đúng hàm mà `train.py` dùng, để thấy trước bao nhiêu câu val được thêm vào và nhãn ra sao.""")
+
+code('''import pandas as pd
+from src.utils.config import load_config
+from src.data.preprocessing import ensure_processed, add_val_leak
+from src.data.dataset import load_split
+cfg = load_config("configs/base.yaml", ["data.val_leak_labels=true"], task="a")
+ensure_processed(cfg)
+tr, va, te = load_split(cfg, "train"), load_split(cfg, "val"), load_split(cfg, "test")
+aug = add_val_leak(cfg, tr, va)
+print(f"\\ntrain goc: fit {int((tr.is_val == 0).sum())} + held-out {int((tr.is_val == 1).sum())}")
+print(f"sau khi them val: fit {int((aug.is_val == 0).sum())} + held-out {int((aug.is_val == 1).sum())}  (held-out phai giu nguyen)")
+print("nguon cua phan fit:", aug[aug.is_val == 0].source.value_counts().to_dict())
+print("test:", len(te), "cau -- chi de du doan")''')
+
+md("""## 4) Kế hoạch
+
+In danh sách run (đúng tên `train.py` sẽ tạo) trước khi train. Run đã xong sẽ tự bỏ qua.""")
+
+code('''from src.utils.config import run_name
+fmt = lambda v: str(v).replace(" ", "")
+VL = ["data.val_leak_labels=true"] if VAL_LEAK else []
+
+def name_of(conf, sets, seed=None, suffix=None):
+    return run_name(load_config(f"configs/{conf}.yaml", sets, task="a", seed=seed, run_suffix=suffix))
+
+JOBS = []      # (nhom, ten model, config, sets, seed, suffix, run name)
+for c in TFIDF:
+    sets = [f"model.clf={c}"] + VL
+    JOBS.append(("tfidf", c, "tfidf", sets, None, None, name_of("tfidf", sets)))
+for label, conf, mname in TRANSFORMERS:
+    for s in SEEDS:
+        sets = [f"training.epochs={EPOCHS}", f"training.early_stopping_patience={EPOCHS}"] + VL \\
+               + ([f"model.name={mname}"] if mname else [])
+        JOBS.append(("trans", label, conf, sets, s, SUFFIX, name_of(conf, sets, s, SUFFIX)))
+for g, label, conf, sets, s, suf, n in JOBS:
+    print(f"  {g:6s} {label:7s} seed {s if s else '-':>3}  ->  {n}")
+print(f"\\n{len(JOBS)} run (ban 90%)" + (" + ban 100% sau do" if RUN_FULL else ""))''')
+
+md("""## 5) Train bản 90% (có điểm held-out)
+
+TF-IDF chạy trên CPU trong vài giây. Mỗi run transformer khoảng 12–13 phút (Task A, thêm 13% dữ
+liệu), 9 run tổng cộng khoảng 2 giờ. Mỗi run tự sinh file nộp riêng cho val và test.""")
+
+code('''import time
+t0 = time.time()
+for n, (g, label, conf, sets, s, suf, name) in enumerate(JOBS, 1):
+    args = " ".join(sets)
+    extra = (f" --seed {s}" if s else "") + (f" --run_suffix {suf}" if suf else "")
+    print("=" * 72, f"\\n[{n}/{len(JOBS)}] {name} | +{(time.time() - t0) / 60:.1f} phut", flush=True)
+    !python train.py --config configs/{conf}.yaml --task a --set {args}{extra}
+print(f"\\nxong trong {(time.time() - t0) / 60:.1f} phut")''')
+
+md("""## 6) Train bản 100% (`_full`)
+
+Gộp cả 639 câu held-out vào phần fit. Không còn gì để chấm điểm, nên mỗi run dùng lại lựa chọn
+của bản 90% tương ứng: **C/alpha** tốt nhất (TF-IDF) và **số epoch tốt nhất** (trung vị theo 3
+seed của từng transformer). Lịch LR chạy đúng số epoch đó rồi giữ epoch cuối.""")
+
+code('''import json, statistics
+FULL_JOBS = []
+if RUN_FULL:
+    for g, label, conf, sets, s, suf, name in JOBS:
+        m = json.load(open(f"results/a/{name}/metrics.json"))
+        if g == "tfidf":
+            fsets = sets + ["data.use_valdataset=false", f"model.param_grid=[{m['best_C']}]"]
+        else:
+            eps = [json.load(open(f"results/a/{n2}/metrics.json"))["best_epoch"]
+                   for g2, l2, *_, n2 in JOBS if g2 == "trans" and l2 == label]
+            ep = max(1, int(round(statistics.median(eps))))
+            fsets = [x for x in sets if not x.startswith("training.")] + \\
+                    [f"training.epochs={ep}", f"training.early_stopping_patience={ep}", "data.use_valdataset=false"]
+        FULL_JOBS.append((g, label, conf, fsets, s, suf, name_of(conf, fsets, s, suf)))
+    t0 = time.time()
+    for n, (g, label, conf, sets, s, suf, name) in enumerate(FULL_JOBS, 1):
+        args = " ".join(sets)
+        extra = (f" --seed {s}" if s else "") + (f" --run_suffix {suf}" if suf else "")
+        print("=" * 72, f"\\n[{n}/{len(FULL_JOBS)}] {name} | +{(time.time() - t0) / 60:.1f} phut", flush=True)
+        !python train.py --config configs/{conf}.yaml --task a --set {args}{extra}
+    print(f"\\nxong trong {(time.time() - t0) / 60:.1f} phut")''')
+
+md("""## 7) Kết quả trên held-out (chỉ bản 90%)
+
+Từng run, trung bình seed của từng model, từng nhóm, ensemble cuối, và các biến thể bỏ bớt một
+model. Lát held-out có 639 câu, nên chênh lệch dưới khoảng 0,02 là trong mức nhiễu. **Đừng chọn
+`W` theo bảng này**: đó chính là tối ưu trên held-out mà ta đang tránh.""")
+
+code('''import numpy as np
+from sklearn.metrics import f1_score
+y = tr.y.to_numpy()[tr.is_val.to_numpy() == 1]
+f1 = lambda p: f1_score(y, p.argmax(1), average="macro")
+P = lambda name, split="eval": np.load(f"results/a/{name}/{split}.npy")
+
+rows = [{"run": n, "nhom": g, "model": l, "macro_f1": round(f1(P(n)), 4)} for g, l, *_, n in JOBS]
+display(pd.DataFrame(rows))
+
+def model_probs(split, jobs, label):
+    return np.mean([P(n, split) for g, l, *_, n in jobs if l == label], axis=0)
+def group_probs(split, jobs, group, drop=()):
+    labels = [l for l, *_ in TRANSFORMERS] if group == "trans" else TFIDF
+    return np.mean([model_probs(split, jobs, l) for l in labels if l not in drop], axis=0)
+def ensemble(split, jobs, w=W_TRANS, drop=()):
+    return w * group_probs(split, jobs, "trans", drop) + (1 - w) * group_probs(split, jobs, "tfidf", drop)
+
+summary = [{"to hop": f"{l} (TB {len(SEEDS)} seed)", "macro_f1": f1(model_probs("eval", JOBS, l))} for l, *_ in TRANSFORMERS]
+summary += [{"to hop": "nhom transformer", "macro_f1": f1(group_probs("eval", JOBS, "trans"))},
+            {"to hop": "nhom TF-IDF", "macro_f1": f1(group_probs("eval", JOBS, "tfidf"))},
+            {"to hop": f"ENSEMBLE (W={W_TRANS})", "macro_f1": f1(ensemble("eval", JOBS))}]
+summary += [{"to hop": f"ensemble bo {d}", "macro_f1": f1(ensemble("eval", JOBS, drop=(d,)))}
+            for d in [l for l, *_ in TRANSFORMERS] + TFIDF]
+summary += [{"to hop": f"(tham khao) W={w}", "macro_f1": f1(ensemble("eval", JOBS, w))} for w in (0.4, 0.5, 0.7, 0.8)]
+display(pd.DataFrame(summary).round(4))''')
+
+md("""## 8) File nộp
+
+Ensemble với cùng trọng số cho:
+- **bản 90%** → `a_test_final` (và `a_val_final`)
+- **bản 100%** → `a_test_final_full` (và `a_val_final_full`)
+
+**Nộp file `test`.** File `val` chỉ sinh ra cho đủ bộ: model đã học chính các câu đó.""")
+
+code('''from src.evaluation.submission import write_submission
+from src.data.dataset import label_names
+labels = label_names("a")
+outs = {}
+for tag, jobs in [("final", JOBS)] + ([("final_full", FULL_JOBS)] if RUN_FULL else []):
+    for split, df in (("val", va), ("test", te)):
+        p = ensemble(split, jobs)
+        outs[(tag, split)] = p
+        write_submission(df.id.values, p, labels, f"results/submissions/a_{split}_{tag}")
+if RUN_FULL:
+    a, b = outs[("final", "test")].argmax(1), outs[("final_full", "test")].argmax(1)
+    print(f"\\nban 90% va ban 100% dong y tren {(a == b).mean():.1%} cau test")''')
+
+md("""## 9) Tải về""")
+
+code('''%cd /kaggle/working/repo
+!mkdir -p /kaggle/working/final_submissions
+!cp -r results/submissions/a_test_final* results/submissions/a_val_final* /kaggle/working/final_submissions/
+!ls -R /kaggle/working/final_submissions | head -30
+!zip -r -q /kaggle/working/results_final.zip results logs
+!ls -lh /kaggle/working/results_final.zip''')
+
+write("final.ipynb")

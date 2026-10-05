@@ -74,7 +74,8 @@ def text_suffix(cfg: dict) -> str:
     """Runs on a different view of the text must not share a results/ folder."""
     d = cfg.get("data", {})
     tt = d.get("text_type")
-    return ("" if tt in (None, "latin") else f"_{tt}") + ("_tta" if d.get("tta") else "")
+    return (("" if tt in (None, "latin") else f"_{tt}") + ("_tta" if d.get("tta") else "")
+            + ("_vl" if d.get("val_leak_labels") else ""))     # fit slice + leak-labelled val
 
 
 _TAG_SKIP = {"checkpoints", "results", "models", ".", ".."}

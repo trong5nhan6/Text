@@ -188,6 +188,46 @@ def prepare_task(task: str, raw_dir, processed_dir, val_ratio=0.1, split_seed=42
     return df
 
 
+def add_val_leak(cfg, train, val, log=print):
+    """data.val_leak_labels (task a only): label the organisers' task-A validation inputs by
+    their presence in the task-B files and add them to the FIT slice.
+
+    Task B holds only Hate comments, copied verbatim with the same id from task A, so an id found
+    in any B file (train, validation or test) is Hate and every other id is Non-Hate. On the
+    labelled task-A train file that rule is exact: 3,160 / 3,160 Hate ids are in a B file and
+    0 / 3,286 Non-Hate ones are.
+
+    What is kept honest: the rows go into the fit slice only (is_val = 0), so the held-out slice
+    -- and every score on it -- is the same 639 rows as before; rows whose text already occurs in
+    train are dropped, so nothing is counted twice; and the test file is never relabelled -- test
+    predictions stay the model's own. The rows carry source = 'val_leak'.
+
+    These labels are inferred from the dataset's structure, not given: disclose their use."""
+    if cfg["task"] != "a":
+        raise SystemExit("data.val_leak_labels chi co nghia voi task a: file B khong lo nhan nhom.")
+    raw = Path(cfg["paths"]["raw_dir"])
+    spec = TASKS["b"]
+    b_files = [_find(raw, spec["train"]), _find(raw, spec["val"])]
+    b_files += sorted(raw.glob(spec["test_glob"])) or sorted(raw.parent.glob(spec["test_glob"]))
+    b_ids = set()
+    for f in b_files:
+        b_ids |= set(pd.read_csv(f, encoding="utf-8-sig", keep_default_na=False)["id"])
+    labels = TASKS["a"]["labels"]                       # ["Non-Hate", "Hate"]
+    v = val.copy()
+    v["label"] = np.where(v["id"].isin(b_ids), "Hate", "Non-Hate")
+    v["y"] = v["label"].map({l: i for i, l in enumerate(labels)})
+    v["group"] = v["text"].map(dedup_key)
+    seen = set(train["group"])
+    dup = v["group"].isin(seen) | v["group"].duplicated() | (v["group"] == "")
+    add = v[~dup].assign(is_val=0, source="val_leak")
+    log(f"val_leak: {len(v)} cau val, gan nhan tu {len(b_files)} file B -> "
+        f"{(v.label == 'Hate').sum()} Hate / {(v.label == 'Non-Hate').sum()} Non-Hate | "
+        f"bo {int(dup.sum())} cau trung train -> them {len(add)} cau vao phan fit "
+        f"({add.label.value_counts().to_dict()})")
+    out = pd.concat([train.assign(source=train.get("source", "train")), add], ignore_index=True)
+    return out[[c for c in out.columns if c in set(train.columns) | {"source"}]]
+
+
 def ensure_processed(cfg, log=print):
     """Build data/processed on demand, and rebuild it when the split settings changed."""
     p = Path(cfg["paths"]["processed_dir"])

@@ -234,6 +234,10 @@ def main():
 
     ensure_processed(cfg, log.info)
     train, val, test = load_split(cfg, "train"), load_split(cfg, "val"), load_split(cfg, "test")
+    if cfg["data"].get("val_leak_labels"):
+        # task-A validation inputs labelled from the task-B files, added to the fit slice only
+        from src.data.preprocessing import add_val_leak
+        train = add_val_leak(cfg, train, val, log.info)
     labels = label_names(cfg["task"])
     set_seed(cfg["seed"])
 

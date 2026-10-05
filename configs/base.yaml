@@ -38,6 +38,11 @@ data:
   # _full so it can never share a directory with the 90% version.
   # null and true both mean "hold the slice back" -- the default, and what every finished run did.
   use_valdataset: null
+  # CHI task a. true: gan nhan cho file validation cua BTC theo cau truc A-B (id co trong file B
+  # nao -> Hate, nguoc lai Non-Hate; dung 100% tren A train) roi them vao PHAN FIT. Lat held-out
+  # giu nguyen, file test KHONG bi gan nhan. Nhan suy ra tu cau truc du lieu -> phai khai bao.
+  # Ten run them _vl.
+  val_leak_labels: null
   val_ratio: 0.1            # one 90/10 split: fit on 90%, score on the held-out 10%
   split_seed: 42            # keep fixed -> every run shares the split, so runs can be blended
   max_len: 96               # 95% of comments < 35 words
