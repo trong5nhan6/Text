@@ -1554,7 +1554,7 @@ LLM_SCOPE  = 'band'          # zeroshot/fewshot: cau nao dua cho LLM cham
 
 # ---- cau hinh train LLM ------------------------------------------------------------
 # Chon 1 PRESET theo suc GPU; moi preset da chon san model + 4-bit + batch phu hop 1 T4 (15 GB).
-#   qwen7b   Qwen2.5-7B-Instruct   4-bit, batch 8x4, grad ckpt   ~1-1,5 gio   (manh nhat)
+#   qwen7b   Qwen2.5-7B-Instruct   4-bit, batch 8x4, grad ckpt   ~40 phut/epoch (manh nhat)
 #   qwen3b   Qwen2.5-3B-Instruct   fp16,  batch 8x4, grad ckpt   ~40 phut
 #   qwen1.5b Qwen2.5-1.5B-Instruct fp16,  batch 16x2             ~20 phut
 #   qwen0.5b Qwen2.5-0.5B-Instruct fp16,  batch 32x1             ~10 phut     (thu nhanh / CPU)
@@ -1580,7 +1580,9 @@ LLM_LR          = _p['lr']        # lr cua LoRA + head
 LLM_LORA_R      = 16              # hang cua LoRA (8 / 16 / 32): lon hon = nhieu tham so train hon
 LLM_LORA_ALPHA  = 32              # he so scale cua LoRA, thuong = 2 x LLM_LORA_R
 LLM_LORA_DROP   = 0.05            # dropout trong LoRA
-LLM_EPOCHS      = 2               # so epoch (cung la do dai lich LR); luu epoch tot nhat theo held-out
+LLM_EPOCHS      = 3               # so epoch (cung la do dai lich LR); luu epoch tot nhat theo held-out.
+                                  # 7B 4-bit tren T4 ~40 phut/epoch; lan chay 10 epoch dat dinh o epoch 3 roi overfit
+LLM_PATIENCE    = 1               # dung som: dung sau LLM_PATIENCE epoch eval F1 khong tang (LLM_EPOCHS = tat)
 LLM_MAX_LEN     = 192             # token = binh luan (<=96 cho 98% cau) + khung prompt (~45)
 LLM_AUX_TARGET  = True            # head phu "doi tuong bi tan cong" (nhom Task B), chi dung khi train
 LLM_TARGET_W    = 0.5             # trong so loss cua head phu
@@ -1835,7 +1837,8 @@ Mọi tham số nằm trong khối `LLM_*` của bảng điều khiển. Cell d�
 | `LLM_MODEL` | theo preset | LLM làm encoder | dán tên model khác (Llama-3.1-8B, Gemma-2-9B cần HF token) |
 | `LLM_4BIT` | True | nạp trọng số 4-bit | bắt buộc với 7B trên T4 |
 | `LLM_LORA_R` / `_ALPHA` / `_DROP` | 16 / 32 / 0,05 | kích thước LoRA (chỉ phần này + head được train) | r=32 nếu LLM học chưa đủ; r=8 nếu overfit |
-| `LLM_EPOCHS` | 2 | số epoch | 3 nếu eval F1 còn tăng ở epoch cuối |
+| `LLM_EPOCHS` | 3 | số epoch, cũng là độ dài lịch LR | 7B overfit sau epoch 3 (train F1 → 1,0, eval F1 giảm): đừng tăng lên 10 |
+| `LLM_PATIENCE` | 1 | dừng sớm sau bấy nhiêu epoch eval F1 không tăng | = `LLM_EPOCHS` để tắt dừng sớm |
 | `LLM_LR` | 1e-4 | learning rate | 5e-5 nếu loss dao động |
 | `LLM_BATCH` × `LLM_GRAD_ACCUM` | 8 × 4 | batch hiệu dụng 32 | OOM → 4 × 8 |
 | `LLM_MAX_LEN` | 192 | độ dài tối đa (token) | giảm nếu OOM |
@@ -1844,7 +1847,7 @@ Mọi tham số nằm trong khối `LLM_*` của bảng điều khiển. Cell d�
 | `LLM_PROMPT` | khung tiếng Anh | câu bọc mỗi bình luận | phải giữ `{text}` |
 
 Tên run tự thêm hậu tố theo các giá trị khác mặc định, nên đổi tham số không đè lên lần train trước.
-Đã có kết quả (từ zip) thì tự bỏ qua. Trên 1 T4, khoảng 1–1,5 giờ với mặc định.
+Đã có kết quả (từ zip) thì tự bỏ qua. Trên 1 T4, 7B mất khoảng 40 phút mỗi epoch, tức khoảng 2 giờ với 3 epoch.
 
 **Không train (`LLM_MODE = 'zeroshot'` / `'fewshot'`)**: chạy `llm_prompt.py` thay vì `train.py`.
 Chỉ dùng `LLM_MODEL`, `LLM_4BIT`, `LLM_K` và `VAL_LEAK` (các tham số train bị bỏ qua); model phải là bản
@@ -1910,7 +1913,7 @@ elif USE_LLM:
         "model": {"name": LLM_MODEL, "load_in_4bit": bool(LLM_4BIT) or None, "aux_target": bool(LLM_AUX_TARGET) or None,
                   "lora": {"r": LLM_LORA_R, "alpha": LLM_LORA_ALPHA, "dropout": LLM_LORA_DROP}},
         "data": {"max_len": LLM_MAX_LEN, "prompt": LLM_PROMPT, "val_leak_labels": bool(VAL_LEAK) or None},
-        "training": {"epochs": LLM_EPOCHS, "early_stopping_patience": LLM_EPOCHS, "lr": LLM_LR,
+        "training": {"epochs": LLM_EPOCHS, "early_stopping_patience": LLM_PATIENCE, "lr": LLM_LR,
                      "head_lr": LLM_LR, "batch_size": LLM_BATCH, "grad_accum": LLM_GRAD_ACCUM,
                      "grad_checkpointing": bool(LLM_GRAD_CKPT), "target_weight": LLM_TARGET_W},
     }

@@ -222,8 +222,7 @@ class Trainer:
                 continue
             if improved:
                 bad = 0
-                best = {"f1": m["macro_f1"], "epoch": ep, "pred": p_va,
-                        "state": {k: v.detach().to("cpu", copy=True) for k, v in self.model.state_dict().items()}}
+                best = {"f1": m["macro_f1"], "epoch": ep, "pred": p_va, "state": self._snapshot()}
                 if ema is not None:
                     ema.swap_out(self.model)  # state_dict captured above already holds the EMA
             else:
@@ -234,13 +233,28 @@ class Trainer:
 
         if best["state"] is not None:
             # self.model, not self.net: a DataParallel state_dict is prefixed with "module."
-            self.model.load_state_dict(best["state"])  # restore best epoch
+            # restore best epoch; a partial snapshot (frozen backbone) leaves the rest as it is
+            missing, unexpected = self.model.load_state_dict(best["state"], strict=False)
+            if unexpected or (missing and len(best["state"]) == len(self.model.state_dict())):
+                raise RuntimeError(f"khoi phuc epoch tot nhat loi: thieu {missing[:3]}, thua {unexpected[:3]}")
         else:
             self.log.info(f"khong co lat eval -> giu epoch CUOI ({best['epoch']}), "
                           f"khong chon duoc epoch tot nhat")
         best["history"] = history
         del best["state"], opt
         return best
+
+    def _snapshot(self):
+        """CPU copy of the weights the best epoch must restore.
+
+        Everything trainable -> the full state_dict. A frozen backbone (LoRA, a 4-bit LLM) ->
+        only the trainable tensors: nothing else moves during training, a 7B copy would cost
+        ~15 GB of RAM per improvement, and a 4-bit state_dict carries bitsandbytes quant-state
+        entries that load_state_dict() rejects as unexpected keys."""
+        params = dict(self.model.named_parameters())
+        if all(p.requires_grad for p in params.values()):
+            return {k: v.detach().to("cpu", copy=True) for k, v in self.model.state_dict().items()}
+        return {k: p.detach().to("cpu", copy=True) for k, p in params.items() if p.requires_grad}
 
     def predict(self, texts):
         if texts is None or len(texts) == 0:
