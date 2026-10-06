@@ -1542,7 +1542,9 @@ SUFFIX = f'_e{EPOCHS}'
 # ---- TANG 2: LLM ----------------------------------------------------------------
 USE_LLM    = True            # them LLM va ghep 2 tang
 LLM_DELTA  = 0.2             # cau co |P_ensemble(Hate) - 0,5| < LLM_DELTA = "vung khong chac" -> hoi LLM
-LLM_MIX    = 0.5             # trong vung do: P = LLM_MIX * P_ensemble + (1 - LLM_MIX) * P_LLM (0 = chi LLM)
+LLM_MIX    = 0.5             # trong vung do: P = LLM_MIX * P_ensemble + (1 - LLM_MIX) * P_LLM
+                             #   0 = LLM QUYET HOAN TOAN cac cau ensemble khong chac | 0.5 = trung binh | 1 = bo LLM
+                             #   (bang muc 7 va file nop luon co them ban mix 0 de so sanh: a_test_final_llm_mix0)
 LLM_MODE   = 'finetune'      # 'finetune' = train LoRA + head (~1 gio voi 7B)
                              # 'zeroshot' = KHONG train: dinh nghia nhan + binh luan -> so P("Hate") voi P("Non-Hate")
                              # 'fewshot'  = KHONG train: nhu zeroshot + LLM_K cau giong nhat trong phan fit kem nhan
@@ -1964,6 +1966,10 @@ display(pd.DataFrame(summary).round(4))''')
 md("""**Ghép 2 tầng** (chỉ khi `USE_LLM`). Câu nào ensemble **chắc chắn** (|P(Hate) − 0,5| ≥ `LLM_DELTA`)
 giữ nguyên dự đoán của ensemble; câu nào **không chắc** thì trộn với LLM theo `LLM_MIX`.
 
+Mỗi delta có hai cột F1:
+- **trộn**: theo `LLM_MIX` đang đặt, P = `LLM_MIX` × P_ensemble + (1 − `LLM_MIX`) × P_LLM;
+- **LLM quyết hoàn toàn** (mix 0): trong vùng, nhãn lấy hẳn theo LLM.
+
 Bảng quan trọng nhất là **độ chính xác TRONG vùng không chắc**: ensemble và LLM, trên cùng các
 câu. LLM chỉ có ích nếu nó đúng nhiều hơn ensemble ở đúng vùng đó.""")
 
@@ -1987,9 +1993,10 @@ if USE_LLM:
             continue
         pc, band = cascade("eval", JOBS, delta=d)
         rows.append({"to hop": f"CASCADE delta={d}" + ("  <- dang dung" if d == LLM_DELTA else ""),
-                     "macro_f1": f1(pc), "cau vao vung khong chac": int(band.sum()),
+                     "macro_f1": f1(pc), "F1 LLM quyet hoan toan (mix 0)": f1(cascade("eval", JOBS, delta=d, mix=0)[0]),
+                     "cau vao vung khong chac": int(band.sum()),
                      "acc ensemble trong vung": round(acc(p1, band), 3), "acc LLM trong vung": round(acc(p2, band), 3)})
-    display(pd.DataFrame(rows).round(4))
+    display(pd.DataFrame(rows).round(4).rename(columns={"macro_f1": f"macro_f1 (tron, mix {LLM_MIX:g})"}))
     print("Luu y: chon delta theo bang nay la toi uu tren held-out (639 cau) -> chi nen doi neu chenh ro.")''')
 
 md("""## 8) File nộp
@@ -1997,7 +2004,9 @@ md("""## 8) File nộp
 Ensemble với cùng trọng số cho:
 - **bản 90%** → `a_test_final` (và `a_val_final`)
 - **bản 100%** → `a_test_final_full` (và `a_val_final_full`)
-- nếu `USE_LLM`: **2 tầng** → `a_test_final_llm` và `a_test_final_full_llm`
+- nếu `USE_LLM`: **2 tầng** → `a_test_final_llm` và `a_test_final_full_llm` (trộn theo `LLM_MIX`)
+- nếu `USE_LLM`: **2 tầng, LLM quyết hoàn toàn trong vùng** → `a_test_final_llm_mix0` và `a_test_final_full_llm_mix0`
+  (bỏ qua nếu `LLM_MIX` = 0, vì khi đó `final_llm` đã là bản này)
 - nếu `USE_LLM` và LLM đã chấm **mọi** câu (finetune, hoặc `LLM_SCOPE = 'all'`): **LLM một mình** → `a_test_final_llmonly`
 
 **Nộp file `test`.** File `val` chỉ sinh ra cho đủ bộ: model đã học chính các câu đó.""")
@@ -2013,14 +2022,22 @@ for tag, jobs in [("final", JOBS)] + ([("final_full", FULL_JOBS)] if RUN_FULL el
         write_submission(df.id.values, p, labels, f"results/submissions/a_{split}_{tag}")
 if USE_LLM:
     # 2 tang: ensemble (90% hoac 100%) + LLM (ban 90%) trong vung khong chac
-    for tag, jobs in [("final_llm", JOBS)] + ([("final_full_llm", FULL_JOBS)] if RUN_FULL else []):
+    # tag -> (jobs, mix): ban tron theo LLM_MIX, va ban LLM quyet hoan toan trong vung (mix 0)
+    llm_tags = {"final_llm": (JOBS, LLM_MIX)}
+    if RUN_FULL:
+        llm_tags["final_full_llm"] = (FULL_JOBS, LLM_MIX)
+    if LLM_MIX != 0:
+        llm_tags["final_llm_mix0"] = (JOBS, 0)
+        if RUN_FULL:
+            llm_tags["final_full_llm_mix0"] = (FULL_JOBS, 0)
+    for tag, (jobs, mix) in llm_tags.items():
         for split, df in (("val", va), ("test", te)):
-            p, band = cascade(split, jobs)
+            p, band = cascade(split, jobs, mix=mix)
             outs[(tag, split)] = p
             write_submission(df.id.values, p, labels, f"results/submissions/a_{split}_{tag}")
             if split == "test":
                 changed = int((p.argmax(1) != ensemble(split, jobs).argmax(1)).sum())
-                print(f"  {tag}: {int(band.sum())} cau test vao vung khong chac, LLM doi {changed} nhan")
+                print(f"  {tag} (mix {mix:g}): {int(band.sum())} cau test vao vung khong chac, LLM doi {changed} nhan")
     if not LLM_BAND_ONLY:
         # LLM tu quyet ca file (khong dung ensemble)
         for split, df in (("val", va), ("test", te)):
