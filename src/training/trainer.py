@@ -7,8 +7,8 @@ import numpy as np
 import torch
 from transformers import get_linear_schedule_with_warmup
 
-from src.data.dataset import make_loader
-from src.evaluation.metrics import compute_metrics
+from src.data.dataset import label_names, make_loader
+from src.evaluation.metrics import compute_metrics, full_metrics, metrics_table
 from src.training.regularizers import EMA, FGM
 
 
@@ -78,7 +78,9 @@ class Trainer:
                       f"{gathered}/GPU")
         return torch.nn.DataParallel(self.model)
 
-    def fit(self, train_df, valid_df):
+    def fit(self, train_df, valid_df, test_df=None):
+        """test_df (data.split=official, labelled): scored every epoch next to train and val, and
+        never read by anything that decides -- the best epoch and early stopping follow val."""
         t = self.t
         feat = self.model.featurizer          # model.hybrid: TF-IDF of each batch, else None
         side = self.model.side_vocab          # model.side_embedding: char/key ids per word, else None
@@ -97,6 +99,17 @@ class Trainer:
         has_val = valid_df is not None and len(valid_df) > 0
         dl_va = (make_loader(valid_df.text.tolist(), None, self.tok, self.cfg, train=False,
                              featurizer=feat, side=side) if has_val else None)
+        # Per-split table (train / val / test) every epoch, when a labelled test set is given.
+        # training.eval_train: null -> follow the table; true -> a clean eval-mode pass over the
+        # fit rows each epoch (~1/3 of a train epoch); false -> the free running train scores.
+        tables = test_df is not None and len(test_df) > 0 and has_val
+        labels = label_names(self.cfg["task"])
+        eval_train = t.get("eval_train")
+        eval_train = tables if eval_train is None else bool(eval_train)
+        dl_te = (make_loader(test_df.text.tolist(), None, self.tok, self.cfg, train=False,
+                             featurizer=feat, side=side) if tables else None)
+        dl_fit = (make_loader(train_df.text.tolist(), None, self.tok, self.cfg, train=False,
+                              featurizer=feat, side=side) if tables and eval_train else None)
 
         if t.get("grad_checkpointing"):
             # Recompute activations in the backward pass instead of keeping them. Roughly a
@@ -127,7 +140,10 @@ class Trainer:
 
         # Balanced routing gives aux == 1.0, total collapse onto one expert gives aux == n_experts.
         # Logged every epoch because a collapsed router is invisible in the macro-F1 alone.
-        aux_w = t.get("moe_aux_weight", 0.0) or 0.0
+        # Only a sparse MoE head has an aux loss; for any other head it is a constant 0, and
+        # logging "moe_aux 0.000" on every epoch of a linear head only misleads.
+        has_aux = getattr(getattr(self.model, "head", None), "aux_loss", None) is not None
+        aux_w = (t.get("moe_aux_weight", 0.0) or 0.0) if has_aux else 0.0
 
         fgm = FGM(self.model, t["fgm"]) if t.get("fgm") else None
         if fgm is not None and not fgm.armed:
@@ -204,19 +220,39 @@ class Trainer:
             m = compute_metrics(valid_df.y, p_va.argmax(1)) if has_val else {}
             aux_avg = aux_sum / len(dl_tr) if aux_w else None
             tm = compute_metrics(torch.cat(tr_true).numpy(), torch.cat(tr_pred).numpy())
+            splits = None
+            if tables:
+                # before the EMA swap-out below: these score the same weights as p_va
+                p_fit = predict_proba(self.net, dl_fit, self.device, self.amp_dtype) if dl_fit else None
+                p_te = predict_proba(self.net, dl_te, self.device, self.amp_dtype)
+                splits = {
+                    # "train~" = running scores of the training passes (dropout on, weights moving)
+                    ("train" if p_fit is not None else "train~"):
+                        full_metrics(train_df.y, labels, proba=p_fit) if p_fit is not None else
+                        full_metrics(torch.cat(tr_true).numpy(), labels, pred=torch.cat(tr_pred).numpy()),
+                    "val": full_metrics(valid_df.y, labels, proba=p_va),
+                    "test": full_metrics(test_df.y, labels, proba=p_te)}
             history.append({"epoch": ep, "loss": round(total / len(dl_tr), 4),
                             "train_macro_f1": round(tm["macro_f1"], 4),
                             "train_accuracy": round(tm["accuracy"], 4),
-                            **({"moe_aux": round(aux_avg, 4)} if aux_w else {}), **m})
+                            **({"moe_aux": round(aux_avg, 4)} if aux_w else {}), **m,
+                            **({"splits": splits} if splits else {})})
             improved = has_val and m["macro_f1"] > best["f1"]
             if ema is not None and not improved:
                 ema.swap_out(self.model)      # keep training from the live trajectory
-            self.log.info(f"ep {ep}/{t['epochs']} loss {total / len(dl_tr):.4f} "
-                          f"| train F1 {tm['macro_f1']:.4f} acc {tm['accuracy']:.4f} "
-                          + (f"| eval F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} " if has_val
-                             else "| khong co lat eval (use_valdataset=false) ")
-                          + (f"moe_aux {aux_avg:.3f} " if aux_w else "")
-                          + f"({time.time() - t0:.0f}s){' *' if improved else ''}")
+            if splits:
+                self.log.info(f"ep {ep}/{t['epochs']} train loss {total / len(dl_tr):.4f} "
+                              + (f"moe_aux {aux_avg:.3f} " if aux_w else "")
+                              + f"({time.time() - t0:.0f}s)"
+                              + (" * val macro-F1 tot nhat" if improved else "")
+                              + "\n" + metrics_table(splits, labels))
+            else:
+                self.log.info(f"ep {ep}/{t['epochs']} loss {total / len(dl_tr):.4f} "
+                              f"| train F1 {tm['macro_f1']:.4f} acc {tm['accuracy']:.4f} "
+                              + (f"| eval F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f} " if has_val
+                                 else "| khong co lat eval (use_valdataset=false) ")
+                              + (f"moe_aux {aux_avg:.3f} " if aux_w else "")
+                              + f"({time.time() - t0:.0f}s){' *' if improved else ''}")
             if not has_val:
                 best = {"f1": float("nan"), "epoch": ep, "pred": None, "state": None}
                 continue

@@ -10,8 +10,9 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.svm import LinearSVC
 
-from src.data.dataset import require_columns, split_rows, text_columns, use_valdataset
-from src.evaluation.metrics import compute_metrics
+from src.data.dataset import label_names, require_columns, split_rows, text_columns, use_valdataset
+from src.data.preprocessing import official_split
+from src.evaluation.metrics import compute_metrics, full_metrics, metrics_table
 
 # Regularisation grid per classifier. `lr`/`svm` take C (inverse strength, bigger = weaker),
 # the rest take alpha (direct strength, bigger = stronger), so the useful ranges differ.
@@ -162,6 +163,13 @@ def fit_and_score(cfg, train, val, test, n_labels, log=print):
         m = {"macro_f1": float("nan"), "accuracy": float("nan")} if p_eval is None else             compute_metrics(ev.y, p_eval.argmax(1))
         if p_eval is None:
             log(f"  {unit}={param}: fit tren 100% du lieu ({len(fit)} dong), khong cham diem")
+        elif official_split(cfg) and test is not None:
+            # no epochs here: one table per grid value; the value is still chosen on val alone
+            labels = label_names(cfg["task"])
+            log(f"  {unit}={param}:\n" + metrics_table({
+                "train": full_metrics(fit.y, labels, proba=_proba(pipe, fit[cols])),
+                "val": full_metrics(ev.y, labels, proba=p_eval),
+                "test": full_metrics(test.y, labels, proba=_proba(pipe, test[cols]))}, labels))
         else:
             log(f"  {unit}={param}: macro-F1 {m['macro_f1']:.4f} acc {m['accuracy']:.4f}")
         if best is None or (p_eval is not None and m["macro_f1"] > best["macro_f1"]):

@@ -26,8 +26,8 @@ import yaml
 
 from src.data.dataset import (infer_columns, label_names, load_split, require_columns,
                               split_rows, text_columns, use_valdataset)
-from src.data.preprocessing import ensure_processed
-from src.evaluation.metrics import compute_metrics, rebuild_metrics_table
+from src.data.preprocessing import ensure_processed, official_split
+from src.evaluation.metrics import compute_metrics, full_metrics, metrics_table, rebuild_metrics_table
 from src.evaluation.submission import write_submission
 from src.utils.config import dump, load_config, resolve_loss, run_name, training_signature
 from src.utils.logger import get_logger
@@ -85,8 +85,9 @@ def backfill_test(cfg, run_dir: Path, name, test, res_dir: Path, log) -> bool:
     log.info(f"{name}: chua co test.npy -> du doan file test tu checkpoint {ck}")
     p = predict_checkpoint_dir(ck, test.text)
     np.save(run_dir / "test.npy", p)
-    write_submission(test.id.values, p, label_names(cfg["task"]),
-                     res_dir / "submissions" / f"{cfg['task']}_test_{name}", log.info)
+    if cfg.get("submission"):
+        write_submission(test.id.values, p, label_names(cfg["task"]),
+                         res_dir / "submissions" / f"{cfg['task']}_test_{name}", log.info)
     mf = run_dir / "metrics.json"
     if mf.exists():
         m = json.load(open(mf))
@@ -160,8 +161,11 @@ def train_transformer(cfg, train, val, test, n_labels, run_dir, log):
     log.info(f"san sang sau {time.time() - t0:.0f}s")
     log.info(f"freeze: {model.freeze_summary}")
     trainer = Trainer(cfg, model, tokenizer, build_loss(loss_name, cfg["training"], counts), device, log)
+    # data.split=official: the test file is labelled, so it is scored every epoch -- for the
+    # log only; the best epoch and early stopping still follow val.
+    scored_test = test.assign(text=test[train_col]) if official_split(cfg) and test is not None else None
     best = trainer.fit(fit.assign(text=fit[train_col]),
-                       ev.assign(text=ev[train_col]) if len(ev) else None)
+                       ev.assign(text=ev[train_col]) if len(ev) else None, scored_test)
 
     def predict(df):
         """Average over the requested views. fit() leaves the model at its best epoch, so one
@@ -270,20 +274,39 @@ def main():
     metrics = {**(compute_metrics(ev.y, out["eval"].argmax(1)) if out["eval"] is not None else {}),
                **out["extra"], "n_eval": len(ev), "has_test": out["test"] is not None,
                "labels": labels, "scored": out["eval"] is not None}
+    if official_split(cfg) and out["eval"] is not None and out["test"] is not None:
+        # the kept model (best epoch on val / best C on val) on the labelled official test file
+        final = {"val": full_metrics(ev.y, labels, proba=out["eval"]),
+                 "test": full_metrics(test.y, labels, proba=out["test"])}
+        metrics.update({"test_macro_f1": final["test"]["macro_f1"],
+                        "test_accuracy": final["test"]["accuracy"], "full": final})
+        hist_file = run_dir / "history.json"
+        if hist_file.exists():
+            # one row per epoch x split, every metric -- for curves in the paper
+            rows = [{"epoch": h["epoch"], "split": sp, "train_loss": h["loss"], **sm}
+                    for h in json.load(open(hist_file)) for sp, sm in (h.get("splits") or {}).items()]
+            if rows:
+                pd.DataFrame(rows).to_csv(run_dir / "epoch_metrics.csv", index=False)
+        x = out["extra"]
+        kept = f"epoch {x['best_epoch']}" if "best_epoch" in x else f"C/alpha {x.get('best_C')}"
+        log.info(f"ket qua cuoi ({kept}, chon theo val macro-F1):\n" + metrics_table(final, labels))
     json.dump(metrics, open(run_dir / "metrics.json", "w"), indent=1)
     rebuild_metrics_table(res_dir)
 
-    # ready-to-submit file for every split we have predictions for
-    subs = res_dir / "submissions"
-    write_submission(val.id.values, out["val"], labels, subs / f"{cfg['task']}_val_{name}", log.info)
-    if out["test"] is not None:
-        write_submission(test.id.values, out["test"], labels, subs / f"{cfg['task']}_test_{name}", log.info)
+    # cfg.submission: a ready-to-submit file for every split we have predictions for
+    if cfg.get("submission"):
+        subs = res_dir / "submissions"
+        write_submission(val.id.values, out["val"], labels, subs / f"{cfg['task']}_val_{name}", log.info)
+        if out["test"] is not None:
+            write_submission(test.id.values, out["test"], labels, subs / f"{cfg['task']}_test_{name}", log.info)
     if out["eval"] is None:
         log.info(f"==> {cfg['task']}/{name}: train tren 100% du lieu ({len(train)} dong), "
-                 f"KHONG co diem noi bo. File nop da sinh; run nay khong vao blend.")
+                 f"KHONG co diem noi bo; run nay khong vao blend.")
     else:
         log.info(f"==> {cfg['task']}/{name} [{len(ev)} eval rows]: "
-                 f"macro-F1 {metrics['macro_f1']:.4f} | acc {metrics['accuracy']:.4f}")
+                 f"macro-F1 {metrics['macro_f1']:.4f} | acc {metrics['accuracy']:.4f}"
+                 + (f" || TEST macro-F1 {metrics['test_macro_f1']:.4f} | acc {metrics['test_accuracy']:.4f}"
+                    if "test_macro_f1" in metrics else ""))
 
 
 if __name__ == "__main__":

@@ -14,6 +14,10 @@ machine translation (data/mt_en.json); each column is simply absent when its cac
 (data.val_ratio, stratified by label). Every model fits on is_val == 0 and is
 scored on is_val == 1, so their predictions line up row for row and can be blended.
 Re-run after the test inputs are released: the split stays identical (same split_seed).
+
+data.split=official instead reads the organisers' released files (paths.official_dir): train ->
+is_val 0, validation -> is_val 1 (the held-out slice, now labelled), test -> {task}_test.csv WITH
+its labels. Written to {processed_dir}/official so the random split stays untouched.
 """
 import argparse
 import hashlib
@@ -41,6 +45,9 @@ TASKS = {
         "test_glob": "*multiclass*test*.csv", "label_col": "Hate Category",
     },
 }
+
+# data.split=official: the released files, every split labelled. {} = train | validation | test
+OFFICIAL = {"a": "hastika_binary_{}.csv", "b": "hastika_multiclass_{}.csv"}
 
 EMOJI = re.compile("[\U0001F000-\U0001FAFF☀-➿️]")
 URL = re.compile(r"https?://\S+|www\.\S+")
@@ -125,19 +132,30 @@ def add_translation(df, log=print):
     return df
 
 
-def code_fingerprint() -> str:
+def code_fingerprint(extra=()) -> str:
     """Hash of the functions that decide what lands in data/processed. Without it, editing
     clean_text leaves a stale data/processed in place and training silently continues on the
     old text -- val_ratio and split_seed alone cannot notice that."""
     src = "".join(inspect.getsource(f)
                   for f in (clean_text, dedup_key, read_inputs, add_transliteration,
-                            add_translation, prepare_task))
+                            add_translation, prepare_task, *extra))
     # join the lines back with nothing: the hash must not depend on CRLF vs LF, so a
     # checkout on Windows and one on Kaggle agree
     return hashlib.sha256("".join(src.splitlines()).encode()).hexdigest()[:12]
 
 
+def official_split(cfg) -> bool:
+    """data.split: null / random = the 90/10 split of binary_train.csv (every finished run);
+    official = train / validation / test exactly as the organisers released them."""
+    sp = cfg.get("data", {}).get("split") or "random"
+    if sp not in ("random", "official"):
+        raise ValueError(f"data.split={sp!r}; expected random | official")
+    return sp == "official"
+
+
 def split_spec(cfg) -> dict:
+    if official_split(cfg):
+        return {"split": "official", "code": code_fingerprint((read_labelled, prepare_official))}
     d = cfg["data"]
     return {"val_ratio": d["val_ratio"], "split_seed": d["split_seed"], "code": code_fingerprint()}
 
@@ -188,6 +206,54 @@ def prepare_task(task: str, raw_dir, processed_dir, val_ratio=0.1, split_seed=42
     return df
 
 
+def read_labelled(path, task) -> pd.DataFrame:
+    """A labelled organiser file -> (id, text, label, y). The task-b test file also carries a
+    `Label` column (all Hate); only `Hate Category` is read, the same column as in train."""
+    spec = TASKS[task]
+    raw = pd.read_csv(path, encoding="utf-8-sig", keep_default_na=False)
+    df = pd.DataFrame({"id": raw["id"], "text": raw["Comment"].map(clean_text),
+                       "label": raw[spec["label_col"]].str.strip()})
+    unknown = set(df.label) - set(spec["labels"])
+    assert not unknown, f"{Path(path).name}: unknown labels {unknown}"
+    df["y"] = df.label.map({l: i for i, l in enumerate(spec["labels"])})
+    return df
+
+
+def prepare_official(task: str, official_dir, processed_dir, log=print):
+    """data.split=official: train -> fit (is_val 0), validation -> held-out (is_val 1), test
+    labelled. Train is de-duplicated exactly as prepare_task does; validation and test are kept
+    row for row, so every score is over the organisers' full files."""
+    official_dir, processed_dir = Path(official_dir), Path(processed_dir)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    f = lambda split: official_dir / OFFICIAL[task].format(split)
+
+    tr = read_labelled(f("train"), task)
+    tr["group"] = tr.text.map(dedup_key)
+    n0 = len(tr)
+    n_lab = tr.groupby("group").label.transform("nunique")
+    n_conflict = int((n_lab > 1).sum())
+    tr = tr[n_lab == 1].drop_duplicates("group").reset_index(drop=True)
+    va, te = read_labelled(f("validation"), task), read_labelled(f("test"), task)
+    va["group"], te["group"] = va.text.map(dedup_key), te.text.map(dedup_key)
+
+    cols = ["id", "text", "label", "group", "y", "is_val"]
+    train = pd.concat([tr.assign(is_val=0), va.assign(is_val=1)], ignore_index=True)[cols]
+    train = add_translation(add_transliteration(train, log), log)
+    train.to_csv(processed_dir / f"{task}_train.csv", index=False)
+    # val.csv = the held-out rows, same order: val.npy and eval.npy are the same predictions
+    train[train.is_val == 1].drop(columns="is_val").to_csv(processed_dir / f"{task}_val.csv", index=False)
+    add_translation(add_transliteration(te, log), log).to_csv(processed_dir / f"{task}_test.csv", index=False)
+    json.dump(split_spec({"data": {"split": "official"}}),
+              open(processed_dir / f"{task}_split.json", "w"), indent=1)
+
+    seen = set(tr.group)
+    log(f"[task {task}] official: train {n0} -> {len(tr)} (bo {n_conflict} cau mau thuan nhan + "
+        f"{n0 - n_conflict - len(tr)} cau trung) | val {len(va)} | test {len(te)}")
+    log(f"[task {task}] trung noi dung voi train (giu nguyen, chi bao): "
+        f"val {int(va.group.isin(seen).sum())}, test {int(te.group.isin(seen).sum())}")
+    return train
+
+
 def add_val_leak(cfg, train, val, log=print):
     """data.val_leak_labels (task a only): label the organisers' task-A validation inputs by
     their presence in the task-B files and add them to the FIT slice.
@@ -205,6 +271,9 @@ def add_val_leak(cfg, train, val, log=print):
     These labels are inferred from the dataset's structure, not given: disclose their use."""
     if cfg["task"] != "a":
         raise SystemExit("data.val_leak_labels chi co nghia voi task a: file B khong lo nhan nhom.")
+    if official_split(cfg):
+        raise SystemExit("data.val_leak_labels khong dung voi data.split=official: file validation "
+                         "da co nhan va chinh la lat cham diem -- dua no vao fit la ro ri.")
     raw = Path(cfg["paths"]["raw_dir"])
     spec = TASKS["b"]
     b_files = [_find(raw, spec["train"]), _find(raw, spec["val"])]
@@ -258,6 +327,10 @@ def ensure_processed(cfg, log=print):
     if stale:
         what = ", ".join(f"{k}: {old!r} -> {new!r}" for k, (old, new) in changed.items())
         log(f"rebuilding data/processed ({what})")
+    if official_split(cfg):
+        if not (p / f"{task}_train.csv").exists() or have is None or stale:
+            prepare_official(task, cfg["paths"]["official_dir"], p, log)
+        return
     # A test file dropped into data/raw after data/processed was built would otherwise never be
     # picked up: the split settings did not change, so nothing above notices it.
     raw = Path(cfg["paths"]["raw_dir"])
@@ -274,8 +347,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/base.yaml")
     ap.add_argument("--tasks", nargs="+", default=["a", "b"])
+    ap.add_argument("--set", nargs="*", action="extend", default=[], metavar="KEY=VALUE",
+                    help="vd data.split=official")
     a = ap.parse_args()
-    cfg = load_config(a.config)
+    cfg = load_config(a.config, a.set)
+    if official_split(cfg):
+        for t in a.tasks:
+            df = prepare_official(t, cfg["paths"]["official_dir"], cfg["paths"]["processed_dir"])
+            print(pd.crosstab(df.is_val, df.label).to_string(), "\n")
+        return
     spec = split_spec(cfg)
     for t in a.tasks:
         df = prepare_task(t, cfg["paths"]["raw_dir"], cfg["paths"]["processed_dir"],

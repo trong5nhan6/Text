@@ -59,6 +59,11 @@ def load_config(path, overrides=(), **top_level) -> dict:
             cfg[k] = v
     # resolve paths relative to the project root
     cfg["paths"] = {k: str((ROOT / v) if not Path(v).is_absolute() else Path(v)) for k, v in cfg["paths"].items()}
+    # data.split=official writes its own processed files; sharing data/processed with the random
+    # split would make every switch between the two rebuild it, and mix their CSVs on Kaggle.
+    if cfg.get("data", {}).get("split") == "official":
+        cfg["paths"]["processed_dir"] = str(Path(cfg["paths"]["processed_dir"]) / "official")
+        cfg["paths"].setdefault("official_dir", str(ROOT / "data" / "HASTIKA_task splits"))
     return cfg
 
 
@@ -76,7 +81,8 @@ def text_suffix(cfg: dict) -> str:
     tt = d.get("text_type")
     return (("" if tt in (None, "latin") else f"_{tt}") + ("_tta" if d.get("tta") else "")
             + ("_vl" if d.get("val_leak_labels") else "")      # fit slice + leak-labelled val
-            + ("_pr" if d.get("prompt") else ""))              # comment wrapped in a prompt frame
+            + ("_pr" if d.get("prompt") else "")               # comment wrapped in a prompt frame
+            + ("_off" if d.get("split") == "official" else ""))  # organisers' train/val/test files
 
 
 _TAG_SKIP = {"checkpoints", "results", "models", ".", ".."}
@@ -152,7 +158,7 @@ def dump(cfg: dict, path):
 # _config_model_name only feeds run_name; it is bookkeeping about where model.name came from,
 # not something the trained weights depend on. Leaving it in the signature would make every run
 # finished before it existed look like a config change and be refused.
-_VOLATILE = {"paths", "run_name", "run_suffix", "config_name", "_config_model_name"}
+_VOLATILE = {"paths", "run_name", "run_suffix", "config_name", "_config_model_name", "submission"}
 
 
 def _drop_none(node):
@@ -210,4 +216,5 @@ def training_signature(cfg: dict) -> dict:
         return sig
     t.pop("num_workers", None)
     t.pop("eval_batch_size", None)
+    t.pop("eval_train", None)                            # what gets logged, not what is learned
     return sig

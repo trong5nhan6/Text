@@ -240,9 +240,10 @@ def main():
                "has_test": test is not None, "scored": True, "macro_f1_uncalibrated": raw["macro_f1"],
                "calibration_bias": bias, "band_only": bool(a.band_file),
                "n_scored": {k: int(len(v)) for k, v in rows.items()}}, open(run_dir / "metrics.json", "w"), indent=1)
-    write_submission(val.id.values, full("val", bias), labels, res / "submissions" / f"a_val_{name}", log)
-    if test is not None:
-        write_submission(test.id.values, full("test", bias), labels, res / "submissions" / f"a_test_{name}", log)
+    if cfg.get("submission"):                            # base.yaml: off unless asked for
+        write_submission(val.id.values, full("val", bias), labels, res / "submissions" / f"a_val_{name}", log)
+        if test is not None:
+            write_submission(test.id.values, full("test", bias), labels, res / "submissions" / f"a_test_{name}", log)
     rebuild_metrics_table(res)
     log(f"==> a/{name} [{len(y_ev)} eval rows]: macro-F1 {cal['macro_f1']:.4f}")
 

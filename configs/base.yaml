@@ -3,10 +3,14 @@
 task: a                     # a = Hate / Non-Hate, b = 6 hate categories (overridable with --task)
 seed: 42
 run_name: null              # default: <config>_<loss>_s<seed>  (tfidf: <config>_<clf>)
+submission: false           # true: moi run ghi them results/submissions/{task}_{val,test}_{run}/
+                            # (predictions.csv + submission.zip cho Codabench). Tat tu khi cuoc thi
+                            # ket thuc; inference.py van tao file nop khi can.
 
 paths:
   raw_dir: data/raw         # organiser CSVs (+ *test*.csv once released)
-  processed_dir: data/processed
+  processed_dir: data/processed   # data.split=official -> data/processed/official (tu dong)
+  official_dir: data/HASTIKA_task splits   # file chinh thuc cua BTC, ca 3 split deu co nhan
   results_dir: results
   checkpoint_dir: checkpoints
   log_dir: logs
@@ -46,6 +50,13 @@ data:
   # Khung prompt cho LLM: {text} duoc thay bang binh luan. null = dua thang binh luan (mac dinh).
   # Ten run them _pr. Chi tokenizer thay khung; TF-IDF / side doc binh luan goc.
   prompt: null
+  # Cach chia du lieu.
+  #   null / random  lat 90/10 cua binary_train.csv (val_ratio, split_seed) -- moi run cu
+  #   official       dung file cua BTC trong paths.official_dir:
+  #                    train -> fit | validation -> held-out (chon epoch, early stop) | test -> CHI cham
+  #                  Moi epoch in bang metric cho ca train / val / test. Test KHONG BAO GIO dung de
+  #                  chon epoch hay sieu tham so. Ten run them _off; data/processed/official rieng.
+  split: null
   val_ratio: 0.1            # one 90/10 split: fit on 90%, score on the held-out 10%
   split_seed: 42            # keep fixed -> every run shares the split, so runs can be blended
   max_len: 96               # 95% of comments < 35 words

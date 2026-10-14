@@ -228,3 +228,7 @@ data/processed/
 checkpoints/
 logs/
 results/
+
+# Official released splits (test gold labels): no redistribution, see docs/LICENSE_NOTE.md.
+# Add them as a Kaggle input and pass --set "paths.official_dir=<that folder>".
+data/HASTIKA_task splits/
