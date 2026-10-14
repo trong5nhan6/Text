@@ -232,3 +232,6 @@ results/
 # Official released splits (test gold labels): no redistribution, see docs/LICENSE_NOTE.md.
 # Add them as a Kaggle input and pass --set "paths.official_dir=<that folder>".
 data/HASTIKA_task splits/
+# Organiser CSVs: same licence, kept local only. On Kaggle copy them in from an input:
+#   !mkdir -p data/raw && cp /kaggle/input/<dataset>/*.csv data/raw/
+data/raw/
