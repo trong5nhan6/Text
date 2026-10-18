@@ -14,6 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 REPO = "trong5nhan6/Text"
 BRANCH = "main"
+# official splits zip (HASTIKA_task splits.zip) on Google Drive, shared by link
+DRIVE_SPLITS_ID = "1vYVv6rOQFbKV5i4myx97FwVSng8YbipK"
 
 cells = []
 
@@ -2060,3 +2062,97 @@ code('''%cd /kaggle/working/repo
 !ls -lh /kaggle/working/results_final.zip''')
 
 write("final.ipynb")
+
+
+# =====================================================================================
+#  Notebook -- fill the xlit / MT caches for the official splits. The first two cache
+#  notebooks ran on data/raw before the official splits were released, so 438 official
+#  comments (most of the Task A test set) are missing; this one adds only those.
+# =====================================================================================
+md(f"""# Bổ sung cache chuyển tự + dịch máy cho split chính thức
+
+`data/xlit_kn.json` và `data/mt_en.json` được sinh từ `data/raw` **trước khi** có split chính
+thức, nên chỉ phủ 368/806 câu test Task A (365/396 Task B). Notebook này tải split chính thức từ
+Google Drive (CSV không nằm trong git), rồi bổ sung đúng **438 câu** còn thiếu, cùng cấu hình như
+lần đầu: IndicXlit beam 4, rồi NLLB-200 600M dịch từ chữ Kannada, 4 beam. Câu đã có trong cache
+được giữ nguyên.
+
+**Settings:** Accelerator = **GPU T4** · Internet = **On**""")
+
+code(f'''import os, subprocess, sys
+REPO, BRANCH, WORK = "{REPO}", "{BRANCH}", "/kaggle/working"
+
+TOKEN = ""
+try:
+    from kaggle_secrets import UserSecretsClient
+    TOKEN = UserSecretsClient().get_secret("GH_TOKEN")
+except Exception:
+    pass
+url = f"https://{{TOKEN + '@' if TOKEN else ''}}github.com/{{REPO}}.git"
+hide = (lambda s: s.replace(TOKEN, "***")) if TOKEN else (lambda s: s)
+
+os.chdir(WORK)
+cmd = (["git", "-C", "repo", "pull", "--ff-only"] if os.path.isdir("repo/.git")
+       else ["git", "clone", "--depth", "1", "-b", BRANCH, url, "repo"])
+r = subprocess.run(cmd, capture_output=True, text=True)
+print(hide((r.stdout + r.stderr).strip()))
+os.chdir(f"{{WORK}}/repo"); sys.path.insert(0, os.getcwd())
+print("cwd:", os.getcwd())''')
+
+md("""## 0) Tải split chính thức từ Google Drive
+
+Giải nén vào `data/HASTIKA_task splits/`, đúng chỗ `src/data/fill_official_caches.py` tìm.""")
+code(f'''!pip -q install gdown
+import glob, shutil, zipfile
+DRIVE_ID = "{DRIVE_SPLITS_ID}"
+!gdown -q "https://drive.google.com/uc?id={{DRIVE_ID}}" -O /kaggle/working/splits.zip
+
+dst = "data/HASTIKA_task splits"
+os.makedirs(dst, exist_ok=True)
+with zipfile.ZipFile("/kaggle/working/splits.zip") as z:
+    z.extractall("/kaggle/working/splits_raw")
+for p in glob.glob("/kaggle/working/splits_raw/**/*.csv", recursive=True):
+    shutil.copy(p, dst)
+print(sorted(os.listdir(dst)))''')
+
+md("""## 1) Cài IndicXlit
+
+Cùng thứ tự với `build_xlit_cache.ipynb`: `fairseq-fixed`, rồi `ai4bharat-transliteration` với
+`--no-deps`, rồi 4 gói nó thật sự cần.""")
+code('''!pip -q install ftfy
+!pip -q install fairseq-fixed
+!pip -q install --no-deps ai4bharat-transliteration
+!pip -q install pydload indic-nlp-library ujson sacremoses
+
+import json, torch
+from src.data.fill_official_caches import todo_texts
+from src.data import transliterate, translate
+
+todo = todo_texts()
+x, m = transliterate.load_cache(), translate.load_cache()
+print(f"can bo sung: {len(todo)} cau (mong doi 438) | thieu xlit {sum(t not in x for t in todo)}, thieu mt {sum(t not in m for t in todo)}")
+print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "khong co")''')
+
+md("""## 2) Chuyển tự rồi dịch
+
+Chạy ở tiến trình riêng; hai bản vá urduhack / torch.load được gọi sẵn trong `build_cache()`.
+Cuối cùng phải in **thiếu sau khi chạy: xlit 0, mt 0**.""")
+code('''!python -m src.data.fill_official_caches''')
+
+md("""## 3) Kiểm tra bằng mắt""")
+code('''import pandas as pd
+x, m = transliterate.load_cache(), translate.load_cache()
+pd.set_option("display.max_colwidth", 60)
+display(pd.DataFrame([{"goc": t[:45], "kannada": x.get(t, "?")[:35], "english": m.get(t, "?")[:55]}
+                      for t in todo[:10]]))''')
+
+md("""## 4) Tải về
+
+Tải **`fill_official_caches.zip`** từ panel **Output** và giải nén ở **thư mục gốc của repo**:
+zip chứa `data/xlit_kn.json` và `data/mt_en.json`, nên hai file đè đúng chỗ.""")
+code('''import zipfile
+z = "/kaggle/working/fill_official_caches.zip"
+print(zipfile.ZipFile(z).namelist())
+!ls -lh {z}''')
+
+write("fill_official_caches.ipynb")
