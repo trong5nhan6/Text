@@ -2115,38 +2115,58 @@ for p in glob.glob("/kaggle/working/splits_raw/**/*.csv", recursive=True):
     shutil.copy(p, dst)
 print(sorted(os.listdir(dst)))''')
 
-md("""## 1) Cài IndicXlit
+md("""## 1) Danh sách câu còn thiếu
 
-Cùng thứ tự với `build_xlit_cache.ipynb`: `fairseq-fixed`, rồi `ai4bharat-transliteration` với
-`--no-deps`, rồi 4 gói nó thật sự cần.""")
+Ghi ra `/kaggle/working/todo_official.json`. Phải là **438 câu**.""")
 code('''!pip -q install ftfy
-!pip -q install fairseq-fixed
-!pip -q install --no-deps ai4bharat-transliteration
-!pip -q install pydload indic-nlp-library ujson sacremoses
+!python -m src.data.fill_official_caches --step todo''')
 
-import json, torch
-from src.data.fill_official_caches import todo_texts
+md("""## 2) Chuyển tự trong môi trường Python 3.9
+
+Kaggle đang chạy **Python 3.13**, và cả `fairseq` lẫn `fairseq-fixed` đều không build được ở đó.
+Nên bước này chạy trong một venv **Python 3.9** riêng (tạo bằng `uv`), nơi PyPI có sẵn **wheel
+dựng sẵn** của `fairseq==0.12.2`, khỏi phải build:
+
+- `pip<24.1`: `omegaconf 2.0.6` (fairseq kéo theo) có metadata cũ mà pip mới từ chối.
+- `torch 1.13.1` bản CPU: 438 câu thì CPU là đủ, và tránh vướng CUDA trong venv.
+- `numpy<2`: wheel fairseq được build với numpy 1.x.
+- `ai4bharat-transliteration` vẫn cài `--no-deps` như notebook cũ, để không kéo `urduhack` /
+  TensorFlow.
+
+Mất khoảng 3 đến 5 phút để cài, phần chuyển tự chỉ vài phút.""")
+code('''!pip -q install uv
+!uv python install 3.9 -q
+!uv venv --python 3.9 --seed -q /kaggle/working/py39
+PY39 = "/kaggle/working/py39/bin/python"
+!{PY39} -m pip -q install "pip<24.1"
+!{PY39} -m pip -q install torch==1.13.1+cpu torchaudio==0.13.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+!{PY39} -m pip -q install "numpy<2" fairseq==0.12.2
+!{PY39} -m pip -q install --no-deps ai4bharat-transliteration
+!{PY39} -m pip -q install pydload indic-nlp-library ujson sacremoses
+!{PY39} -c "import fairseq, torch; print('fairseq', fairseq.__version__, '| torch', torch.__version__)"''')
+code('''!{PY39} -m src.data.fill_official_caches --step xlit''')
+
+md("""## 3) Dịch bằng NLLB (môi trường chính, GPU T4)""")
+code('''import torch
+print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "khong co")
+!python -m src.data.fill_official_caches --step mt''')
+
+md("""## 4) Kiểm tra bằng mắt, rồi đóng gói
+
+Cell đóng gói phải in **thiếu sau khi chạy: xlit 0, mt 0**; nếu chưa đủ thì nó dừng và không
+tạo zip.""")
+code('''import json
+import pandas as pd
 from src.data import transliterate, translate
 
-todo = todo_texts()
-x, m = transliterate.load_cache(), translate.load_cache()
-print(f"can bo sung: {len(todo)} cau (mong doi 438) | thieu xlit {sum(t not in x for t in todo)}, thieu mt {sum(t not in m for t in todo)}")
-print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "khong co")''')
-
-md("""## 2) Chuyển tự rồi dịch
-
-Chạy ở tiến trình riêng; hai bản vá urduhack / torch.load được gọi sẵn trong `build_cache()`.
-Cuối cùng phải in **thiếu sau khi chạy: xlit 0, mt 0**.""")
-code('''!python -m src.data.fill_official_caches''')
-
-md("""## 3) Kiểm tra bằng mắt""")
-code('''import pandas as pd
+todo = json.load(open("/kaggle/working/todo_official.json", encoding="utf-8"))
 x, m = transliterate.load_cache(), translate.load_cache()
 pd.set_option("display.max_colwidth", 60)
 display(pd.DataFrame([{"goc": t[:45], "kannada": x.get(t, "?")[:35], "english": m.get(t, "?")[:55]}
                       for t in todo[:10]]))''')
+code('''!python -m src.data.fill_official_caches --step zip''')
 
-md("""## 4) Tải về
+md("""## 5) Tải về
 
 Tải **`fill_official_caches.zip`** từ panel **Output** và giải nén ở **thư mục gốc của repo**:
 zip chứa `data/xlit_kn.json` và `data/mt_en.json`, nên hai file đè đúng chỗ.""")
